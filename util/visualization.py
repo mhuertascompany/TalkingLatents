@@ -4,7 +4,7 @@ import numpy as np
 import umap
 
 
-def plot_quantiles(true, preds, quantiles, scales, names):
+def plot_quantiles(true, preds, quantiles, scales, names, savedir='figs'):
     num_quantiles = len(quantiles) // 2
     for i, (name, scale) in enumerate(zip(names, scales)):
         color_list = plt.cm.get_cmap('Dark2', 8)
@@ -26,10 +26,10 @@ def plot_quantiles(true, preds, quantiles, scales, names):
         plt.xlabel(f'True {name}')
         plt.ylabel(f'Predicted {name}')
         plt.legend()
-        plt.savefig(f'predictions_{name}.png')
-        plt.show()
+        plt.savefig(f'{savedir}/predictions_{name}.png')
+        plt.close()
 
-def plot_decode(true, preds, info, wv=None, num_sampels=10):
+def plot_decode(true, preds, info, wv=None, num_sampels=10, savedir='figs'):
     for i in range(num_sampels):
         id = info.loc[i, 'obsid']
         fig, axes = plt.subplots(2,1)
@@ -45,18 +45,17 @@ def plot_decode(true, preds, info, wv=None, num_sampels=10):
         fig.supylabel('Flux')
         plt.tight_layout()
         plt.legend()
-        plt.savefig(f'figs/reconstruction_sample_{i}.png')
-        plt.show()
+        plt.savefig(f'{savedir}/reconstruction_sample_{i}.png')
+        plt.close()
 
 
-def plot_umap(features, info_df, colors):
+def plot_umap(features, info_df, colors, savedir='figs'):
     reducer_standard = umap.UMAP(n_components=2, random_state=42)  # Added random_state for reproducibility
     u_res = reducer_standard.fit_transform(features)
     for color in colors:
-        color_col = color.lower() if color != 'RV' else color
-        plt.scatter(u_res[:, 0], u_res[:, 1], c=info_df[color_col])
+        plt.scatter(u_res[:, 0], u_res[:, 1], c=info_df[color])
         plt.colorbar(label=color)
         plt.xlabel('umap x')
         plt.ylabel('umap y')
-        plt.savefig(f'figs/umap_{color}.png')
-        plt.show()
+        plt.savefig(f'{savedir}/umap_{color}.png')
+        plt.close()

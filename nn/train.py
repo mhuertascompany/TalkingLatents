@@ -1,23 +1,14 @@
 import torch
-import torch.nn.functional as F
-from torch.cuda.amp import autocast
 import numpy as np
 import time
-import umap
 
 import os
-import yaml
 import json
-from matplotlib import pyplot as plt
 import glob
 from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
-import umap
-from torch.profiler import profile, record_function, ProfilerActivity
-from sklearn.model_selection import KFold
-from torch.utils.data import Subset, DataLoader
-from src.utils import kepler_collate_fn
+from torch.utils.data import Subset
 from pathlib import Path
 import io
 import zipfile
