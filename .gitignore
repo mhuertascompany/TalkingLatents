@@ -1,0 +1,22 @@
+# Directories to ignore
+logs/
+logs/*/
+pretrained_models/
+
+# Specific files
+data/dataset_noiseless.tar.gz
+data/dataset_noiseless/
+
+# File extensions
+*.pth
+*.npy
+*.csv
+
+# Optional: Common additional ignores
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.DS_Store
+.vscode/
+.idea/
