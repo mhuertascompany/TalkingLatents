@@ -2,7 +2,8 @@
 logs/
 logs/*/
 pretrained_models/
-
+checkpoints/
+llama_url.txt
 
 # Specific files
 data/dataset_noiseless.tar.gz
@@ -12,6 +13,7 @@ data/dataset_noiseless/
 *.pth
 *.npy
 *.csv
+*.pt
 
 # Optional: Common additional ignores
 __pycache__/

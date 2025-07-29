@@ -1,6 +1,7 @@
 import torch
 from collections import OrderedDict
 from typing import List
+import pandas as pd
 
 def kepler_collate_fn(batch:List):
     """
@@ -61,3 +62,25 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
     print("missing keys: ", missing)
     print("unexpected keys: ", unexpected)
     return model
+
+def merge_dataframes_and_filter_array(df1, df2, right_on, left_on,  array):
+    """
+    Merge two dataframes on all columns and filter corresponding numpy array
+    Parameters:
+    - df1: First dataframe (berger_lamost)
+    - df2: Second dataframe (features_meta)
+    - array: Numpy array aligned with df2 (features)
+    Returns:
+    - merged_df: Merged dataframe
+    - filtered_array: Filtered numpy array
+    """
+    # Track original indices
+    df2_indexed = df2.reset_index().rename(columns={'index': 'original_idx'})
+    # Merge on all original columns from df2
+    merged = pd.merge(df1, df2_indexed, right_on=right_on, left_on=left_on, how='inner', suffixes=['', '_2'])
+    # Filter array based on surviving indices
+    surviving_indices = merged['original_idx'].values
+    filtered_array = array[surviving_indices]
+    # Clean up merged dataframe
+    final_df = merged.drop('original_idx', axis=1).reset_index(drop=True)
+    return final_df, filtered_array

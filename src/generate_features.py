@@ -1,6 +1,6 @@
 import yaml
 from data.transforms import *
-from data.dataset import SpectraDataset
+from data.spectra_dataset import SpectraDataset
 import pandas as pd
 from nn.models import *
 from nn.train import *
@@ -143,7 +143,7 @@ if __name__ == '__main__':
                         help='Path to csv with meta data (stellar parameters, ids, etc.)')
     parser.add_argument('--simulation', type=bool, default=False,
                         help='Run on simulated data (default: False)')
-    parser.add_argument('--max_iter', type=int, default=100,
+    parser.add_argument('--max_iter', type=int, default=np.inf,
                         help='Number of iterations (default: 100)')
 
     args = parser.parse_args()
