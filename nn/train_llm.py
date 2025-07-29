@@ -19,15 +19,16 @@ from util.utils import merge_dataframes_and_filter_array
 class LoRALayer(nn.Module):
     """LoRA (Low-Rank Adaptation) layer"""
 
-    def __init__(self, in_features: int, out_features: int, rank: int = 16, alpha: float = 16.0, dropout: float = 0.1):
+    def __init__(self, in_features: int, out_features: int, rank: int = 16, alpha: float = 16.0, dropout: float = 0.1,
+                 device=None):
         super().__init__()
         self.rank = rank
         self.alpha = alpha
         self.scaling = alpha / rank
 
-        # LoRA matrices
-        self.lora_A = nn.Parameter(torch.randn(rank, in_features) * 0.01)
-        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        # LoRA matrices - initialize on correct device
+        self.lora_A = nn.Parameter(torch.randn(rank, in_features, device=device) * 0.01)
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank, device=device))
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
@@ -43,10 +44,14 @@ class LoRALinear(nn.Module):
     def __init__(self, original_layer: nn.Linear, rank: int = 16, alpha: float = 16.0, dropout: float = 0.1):
         super().__init__()
         self.original_layer = original_layer
+
+        # Get device from original layer
+        device = next(original_layer.parameters()).device
+
         self.lora = LoRALayer(
             original_layer.in_features,
             original_layer.out_features,
-            rank, alpha, dropout
+            rank, alpha, dropout, device=device
         )
 
         # Freeze original layer
@@ -134,13 +139,13 @@ class StarLlamaTrainer:
             'lora_alpha': 16.0,
             'lora_dropout': 0.1,
             'lora_target_modules': [
-                'layers.*.attention.wq',
-                'layers.*.attention.wk',
-                'layers.*.attention.wv',
-                'layers.*.attention.wo',
-                'layers.*.feed_forward.w1',
-                'layers.*.feed_forward.w2',
-                'layers.*.feed_forward.w3'
+                'base_model.layers.*.attention.wq',
+                'base_model.layers.*.attention.wk',
+                'base_model.layers.*.attention.wv',
+                'base_model.layers.*.attention.wo',
+                'base_model.layers.*.feed_forward.w1',
+                'base_model.layers.*.feed_forward.w2',
+                'base_model.layers.*.feed_forward.w3'
             ],
         }
 
@@ -235,20 +240,60 @@ class StarLlamaTrainer:
         """Apply LoRA to the model"""
         print("Applying LoRA layers...")
 
+        # First, let's see what modules actually exist in the model
+        print("Available modules in model:")
+        all_modules = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Linear):
+                all_modules.append(name)
+
+        print(f"Found {len(all_modules)} Linear modules:")
+        for i, name in enumerate(all_modules[:10]):  # Show first 10
+            print(f"  {name}")
+        if len(all_modules) > 10:
+            print(f"  ... and {len(all_modules) - 10} more")
+
         # Convert wildcard patterns to actual module names
         target_modules = []
+        import re
+
         for pattern in self.config['lora_target_modules']:
             if '*' in pattern:
-                # Find matching modules
-                for name, _ in self.model.named_modules():
-                    import re
-                    pattern_regex = pattern.replace('*', r'[^.]*')
-                    if re.match(f"^{pattern_regex}$", name):
-                        target_modules.append(name)
-            else:
-                target_modules.append(pattern)
+                # Convert pattern to regex, handling multiple wildcards
+                pattern_regex = pattern.replace('.', r'\.').replace('*', r'[^.]+')
+                pattern_regex = f"^{pattern_regex}$"
 
-        print(f"Target modules for LoRA: {target_modules[:5]}...")  # Show first 5
+                # Find matching modules
+                matched_modules = []
+                for name in all_modules:
+                    if re.match(pattern_regex, name):
+                        matched_modules.append(name)
+                        target_modules.append(name)
+
+                print(f"Pattern '{pattern}' matched {len(matched_modules)} modules")
+                if matched_modules:
+                    print(f"  Examples: {matched_modules[:3]}")
+            else:
+                if pattern in all_modules:
+                    target_modules.append(pattern)
+                    print(f"Direct match: {pattern}")
+                else:
+                    print(f"Warning: Pattern '{pattern}' not found in model")
+
+        print(f"\nTotal target modules for LoRA: {len(target_modules)}")
+        if target_modules:
+            print("Target modules:")
+            for i, name in enumerate(target_modules[:5]):
+                print(f"  {name}")
+            if len(target_modules) > 5:
+                print(f"  ... and {len(target_modules) - 5} more")
+
+        if not target_modules:
+            print("ERROR: No target modules found! Check your lora_target_modules patterns.")
+            print("Available Linear module examples:")
+            for name in all_modules[:10]:
+                print(f"  {name}")
+            return
 
         self.lora_modules = apply_lora_to_model(
             self.model,
@@ -258,7 +303,7 @@ class StarLlamaTrainer:
             dropout=self.config['lora_dropout']
         )
 
-        print(f"Applied LoRA to {len(self.lora_modules)} modules")
+        print(f"Successfully applied LoRA to {len(self.lora_modules)} modules")
 
     def _apply_freeze_strategy(self, strategy: str):
         """Apply different freezing strategies to the model"""
@@ -664,8 +709,8 @@ def main(num_samples=5000):
         'save_every_n_epochs': 2,
 
         # Progressive training: start with encoder only, then LoRA
-        'freeze_strategy': 'encoder_only',
-        'encoder_only_epochs': 3,  # Switch to LoRA after 3 epochs
+        'freeze_strategy': 'lora',
+        'encoder_only_epochs': 0,  # Switch to LoRA after 3 epochs
         'encoder_lr_multiplier': 1.0,
         'lora_lr_multiplier': 1.0,
 
@@ -674,20 +719,20 @@ def main(num_samples=5000):
         'lora_alpha': 16.0,
         'lora_dropout': 0.1,
         'lora_target_modules': [
-            'layers.*.attention.wq',
-            'layers.*.attention.wk',
-            'layers.*.attention.wv',
-            'layers.*.attention.wo',
-            'layers.*.feed_forward.w1',
-            'layers.*.feed_forward.w2',
-            'layers.*.feed_forward.w3'
-        ],
+                'base_model.layers.*.attention.wq',
+                'base_model.layers.*.attention.wk',
+                'base_model.layers.*.attention.wv',
+                'base_model.layers.*.attention.wo',
+                'base_model.layers.*.feed_forward.w1',
+                'base_model.layers.*.feed_forward.w2',
+                'base_model.layers.*.feed_forward.w3'
+            ],
     }
 
     # Paths (update these to your actual paths)
     model_checkpoint_path = MODEL_PATH
     tokenizer_path = TOKENIZER_PATH
-    multimmodal_checkpoints = 'checkpoints/best_model.pt'
+    multimmodal_checkpoints = 'checkpoints/best_model_lora_5000_samples.pt'
 
     # Create sample data for testing
     print("Creating sample data...")
@@ -708,7 +753,7 @@ def main(num_samples=5000):
     # Create trainer
     trainer = StarLlamaTrainer(
         model_checkpoint_path=model_checkpoint_path,
-        multimodal_checkpoints=None,
+        multimodal_checkpoints=multimmodal_checkpoints,
         tokenizer_path=tokenizer_path,
         latent_features=latent_features,
         metadata_df=metadata_df,
