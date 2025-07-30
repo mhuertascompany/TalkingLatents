@@ -16,6 +16,65 @@ from nn.llm import MultimodalLlamaModel, create_multimodal_llama, train_step, ev
 from util.utils import merge_dataframes_and_filter_array
 
 
+class EarlyStopping:
+    """Early stopping utility class"""
+
+    def __init__(self, patience: int = 5, min_delta: float = 0.0, restore_best_weights: bool = True):
+        """
+        Initialize early stopping
+
+        Args:
+            patience: Number of epochs to wait for improvement before stopping
+            min_delta: Minimum change to qualify as an improvement
+            restore_best_weights: Whether to restore the best model weights when stopping
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.best_weights = None
+        self.early_stop = False
+
+    def __call__(self, val_loss: float, model: nn.Module = None) -> bool:
+        """
+        Check if early stopping criteria is met
+
+        Args:
+            val_loss: Current validation loss
+            model: Model to save weights from (if restore_best_weights=True)
+
+        Returns:
+            True if training should stop, False otherwise
+        """
+        # Check if this is an improvement
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+
+            # Save best weights if requested
+            if self.restore_best_weights and model is not None:
+                self.best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+        else:
+            self.counter += 1
+
+        # Check if we should stop
+        if self.counter >= self.patience:
+            self.early_stop = True
+
+        return self.early_stop
+
+    def restore_best_model(self, model: nn.Module):
+        """Restore the best model weights"""
+        if self.best_weights is not None:
+            model.load_state_dict(self.best_weights)
+            print(f"Restored best model weights (validation loss: {self.best_loss:.4f})")
+        else:
+            print("Warning: No best weights to restore")
+
+
 class LoRALayer(nn.Module):
     """LoRA (Low-Rank Adaptation) layer"""
 
@@ -88,7 +147,7 @@ def apply_lora_to_model(model: nn.Module, target_modules: List[str], rank: int =
 
 
 class StarLlamaTrainer:
-    """Complete training pipeline for Star LLaMA with multimodal capabilities and LoRA"""
+    """Complete training pipeline for Star LLaMA with multimodal capabilities, LoRA, and early stopping"""
 
     def __init__(self,
                  model_checkpoint_path: str,
@@ -128,6 +187,11 @@ class StarLlamaTrainer:
             'weight_decay': 0.01,
             'max_grad_norm': 1.0,
 
+            # Early stopping configuration
+            'early_stopping_patience': 5,  # Stop after 5 epochs without improvement
+            'early_stopping_min_delta': 0.001,  # Minimum improvement threshold
+            'restore_best_weights': True,  # Restore best model when stopping
+
             # Freezing configuration
             'freeze_strategy': 'encoder_only',  # 'encoder_only', 'lora', 'none'
             'encoder_only_epochs': 3,  # Train only encoder for first N epochs
@@ -160,10 +224,18 @@ class StarLlamaTrainer:
         self.model = None
         self.train_loader = None
         self.val_loader = None
+        self.test_loader = None
         self.optimizer = None
         self.scheduler = None
         self.current_freeze_state = None
         self.lora_modules = {}
+
+        # Initialize early stopping
+        self.early_stopping = EarlyStopping(
+            patience=self.config['early_stopping_patience'],
+            min_delta=self.config['early_stopping_min_delta'],
+            restore_best_weights=self.config['restore_best_weights']
+        )
 
     def setup(self):
         """Setup all components for training"""
@@ -189,18 +261,28 @@ class StarLlamaTrainer:
 
         if self.multimodal_checkpoints is not None:
             print(f"Loading multimodal checkpoints from {self.multimodal_checkpoints}...")
-            self.model.load_state_dict(torch.load(self.multimodal_checkpoints)['model_state_dict'])
+            checkpoint = torch.load(self.multimodal_checkpoints, map_location='cpu')
+
+            # Check if this checkpoint contains LoRA layers
+            state_dict = checkpoint['model_state_dict']
+            has_lora = any('lora' in key for key in state_dict.keys())
+
+            if has_lora:
+                print("Checkpoint contains LoRA layers, applying LoRA first...")
+                # Apply LoRA before loading the state dict
+                self._apply_lora()
+
+            self.model.load_state_dict(state_dict)
 
         self.model.to(self.device)
 
         # Setup data loaders
         print("Setting up data loaders...")
-        self.train_loader, self.val_loader = setup_dataloaders(
+        self.train_loader, self.val_loader, self.test_loader = setup_dataloaders(
             self.latent_features,
             self.metadata_df,
             self.tokenizer,
             batch_size=self.config['batch_size'],
-            train_split=self.config['train_split'],
             noise_std=self.config['noise_std']
         )
 
@@ -209,6 +291,8 @@ class StarLlamaTrainer:
         self._setup_optimizer()
 
         print("Setup complete!")
+        print(f"Early stopping enabled: patience={self.config['early_stopping_patience']}, "
+              f"min_delta={self.config['early_stopping_min_delta']}")
 
     def _load_base_model(self) -> Transformer:
         """Load the base LLaMA model"""
@@ -488,8 +572,10 @@ class StarLlamaTrainer:
         self._setup_optimizer()
 
     def train(self):
-        """Main training loop"""
+        """Main training loop with early stopping"""
         print("Starting training...")
+        print(f"Early stopping: patience={self.early_stopping.patience}, "
+              f"min_delta={self.early_stopping.min_delta}")
 
         best_val_loss = float('inf')
         step = 0
@@ -525,7 +611,8 @@ class StarLlamaTrainer:
                     lr_str = ', '.join([f"{lr:.2e}" for lr in current_lrs])
                     print(f"  Batch {batch_idx}/{len(self.train_loader)}, "
                           f"Loss: {loss:.4f}, LRs: [{lr_str}], "
-                          f"Freeze: {self.current_freeze_state}")
+                          f"Freeze: {self.current_freeze_state}, "
+                          f"ES counter: {self.early_stopping.counter}/{self.early_stopping.patience}")
 
                 # Evaluation
                 if step % self.config['eval_every_n_steps'] == 0:
@@ -539,7 +626,7 @@ class StarLlamaTrainer:
 
                     self.model.train()  # Back to training mode
 
-            # Epoch summary
+            # Epoch summary and early stopping check
             avg_train_loss = epoch_train_loss / num_batches
             val_loss = evaluate_model(self.model, self.val_loader, self.device)
 
@@ -547,6 +634,18 @@ class StarLlamaTrainer:
             print(f"  Average Train Loss: {avg_train_loss:.4f}")
             print(f"  Validation Loss: {val_loss:.4f}")
             print(f"  Current Freeze Strategy: {self.current_freeze_state}")
+            print(f"  Early Stopping Counter: {self.early_stopping.counter}/{self.early_stopping.patience}")
+
+            # Check early stopping
+            if self.early_stopping(val_loss, self.model):
+                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+                print(f"Best validation loss: {self.early_stopping.best_loss:.4f}")
+
+                # Restore best weights if requested
+                if self.config['restore_best_weights']:
+                    self.early_stopping.restore_best_model(self.model)
+
+                break
 
             # Save checkpoint
             if (epoch + 1) % self.config['save_every_n_epochs'] == 0:
@@ -554,6 +653,15 @@ class StarLlamaTrainer:
 
             # Generate sample response
             self._generate_sample_response(epoch)
+
+        # Final summary
+        if self.early_stopping.early_stop:
+            print(f"\nTraining stopped early due to no improvement in validation loss")
+            print(f"Total epochs trained: {epoch + 1}")
+        else:
+            print(f"\nTraining completed all {self.config['num_epochs']} epochs")
+
+        print(f"Best validation loss achieved: {self.early_stopping.best_loss:.4f}")
 
     def _save_checkpoint(self, epoch: int, step: int, val_loss: float, is_best: bool = False):
         """Save model checkpoint"""
@@ -565,7 +673,12 @@ class StarLlamaTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'val_loss': val_loss,
             'config': self.config,
-            'lora_modules': list(self.lora_modules.keys()) if self.lora_modules else []
+            'lora_modules': list(self.lora_modules.keys()) if self.lora_modules else [],
+            'early_stopping_state': {
+                'best_loss': self.early_stopping.best_loss,
+                'counter': self.early_stopping.counter,
+                'early_stop': self.early_stopping.early_stop
+            }
         }
 
         if is_best:
@@ -611,9 +724,30 @@ class StarLlamaTrainer:
         print(f"Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # Check if this checkpoint contains LoRA layers
+        state_dict = checkpoint['model_state_dict']
+        has_lora = any('lora' in key for key in state_dict.keys())
+
+        if has_lora and not self.lora_modules:
+            print("Checkpoint contains LoRA layers, applying LoRA first...")
+            # Apply LoRA before loading the state dict
+            self._apply_lora()
+
+        self.model.load_state_dict(state_dict)
+
+        if self.optimizer and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if self.scheduler and 'scheduler_state_dict' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # Restore early stopping state if available
+        if 'early_stopping_state' in checkpoint:
+            es_state = checkpoint['early_stopping_state']
+            self.early_stopping.best_loss = es_state['best_loss']
+            self.early_stopping.counter = es_state['counter']
+            self.early_stopping.early_stop = es_state['early_stop']
+            print(f"Restored early stopping state: best_loss={es_state['best_loss']:.4f}, "
+                  f"counter={es_state['counter']}")
 
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         return checkpoint
@@ -630,7 +764,7 @@ class StarLlamaTrainer:
         ]
 
         with torch.no_grad():
-            for i in range(min(num_samples, len(self.val_loader.dataset))):
+            for i in range(min(num_samples, len(self.test_loader.dataset))):
                 sample = self.val_loader.dataset[i]
                 question = str(np.random.choice(questions))
                 question_tokens = self.tokenizer.encode(question, bos=True, eos=False)
@@ -691,22 +825,34 @@ class StarLlamaTrainer:
             print(f"\nLoRA modules applied: {len(self.lora_modules)}")
             print(f"LoRA rank: {self.config['lora_rank']}, alpha: {self.config['lora_alpha']}")
 
+        # Early stopping status
+        print(f"\nEarly stopping status:")
+        print(f"  Patience: {self.early_stopping.patience}")
+        print(f"  Current counter: {self.early_stopping.counter}")
+        print(f"  Best validation loss: {self.early_stopping.best_loss:.4f}")
+        print(f"  Early stop triggered: {self.early_stopping.early_stop}")
+
         print("=" * 40)
 
 
 def main(num_samples=5000):
     """Main function to run training"""
 
-    # Configuration for progressive training with LoRA
+    # Configuration for progressive training with LoRA and early stopping
     config = {
         'batch_size': 4,
         'learning_rate': 5e-4,  # Higher LR for LoRA
-        'num_epochs': 8,
+        'num_epochs': 50,  # Set high, early stopping will handle it
         'max_sequence_length': 256,
         'noise_std': 0.02,
         'train_split': 0.8,
-        'eval_every_n_steps': 25,
+        'eval_every_n_steps': 100,
         'save_every_n_epochs': 2,
+
+        # Early stopping configuration
+        'early_stopping_patience': 7,  # Stop after 7 epochs without improvement
+        'early_stopping_min_delta': 0.001,  # Minimum improvement of 0.001
+        'restore_best_weights': True,  # Restore best model when stopping
 
         # Progressive training: start with encoder only, then LoRA
         'freeze_strategy': 'lora',
@@ -715,18 +861,20 @@ def main(num_samples=5000):
         'lora_lr_multiplier': 1.0,
 
         # LoRA configuration
-        'lora_rank': 16,
+        'lora_rank': 32,
         'lora_alpha': 16.0,
         'lora_dropout': 0.1,
         'lora_target_modules': [
-                'base_model.layers.*.attention.wq',
-                'base_model.layers.*.attention.wk',
-                'base_model.layers.*.attention.wv',
-                'base_model.layers.*.attention.wo',
-                'base_model.layers.*.feed_forward.w1',
-                'base_model.layers.*.feed_forward.w2',
-                'base_model.layers.*.feed_forward.w3'
-            ],
+            'base_model.layers.*.attention.wq',
+            'base_model.layers.*.attention.wk',
+            'base_model.layers.*.attention.wv',
+            'base_model.layers.*.attention.wo',
+            'base_model.layers.*.feed_forward.w1',
+            'base_model.layers.*.feed_forward.w2',
+            'base_model.layers.*.feed_forward.w3',
+            'base_model.output',
+            'base_model.tok_embeddings'
+        ],
     }
 
     # Paths (update these to your actual paths)
@@ -790,14 +938,18 @@ def main(num_samples=5000):
         # Print initial model status
         trainer.print_model_status()
 
-        # Train with automatic freeze strategy transitions
+        # Train with automatic freeze strategy transitions and early stopping
         trainer.train()
 
         # Final evaluation
-        trainer.evaluate_on_samples(num_samples=5)
+        trainer.evaluate_on_samples(num_samples=10)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
+        # Still try to restore best weights if available
+        if trainer.early_stopping.best_weights and config['restore_best_weights']:
+            print("Restoring best model weights before exit...")
+            trainer.early_stopping.restore_best_model(trainer.model)
     except Exception as e:
         print(f"Training failed with error: {e}")
         import traceback
@@ -807,4 +959,4 @@ def main(num_samples=5000):
 
 
 if __name__ == "__main__":
-    main()
+    main(100)

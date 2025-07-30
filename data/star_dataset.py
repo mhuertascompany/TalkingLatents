@@ -4,6 +4,7 @@ import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Dict, Tuple, Optional
 import random
+from sklearn.model_selection import train_test_split
 from dataclasses import dataclass
 import torch.nn as nn
 
@@ -387,52 +388,164 @@ def create_sample_data(n_samples: int = 1000, latent_dim: int = 128):
     return latent_features, metadata_df
 
 
-def setup_dataloaders(latent_features: np.ndarray,
-                      metadata_df: pd.DataFrame,
-                      llama_tokenizer,
-                      batch_size: int = 8,
-                      train_split: float = 0.8,
-                      noise_std: float = 0.01):
-    """Setup train and validation dataloaders"""
+def setup_dataloaders(
+        latent_features: np.ndarray,
+        metadata_df: pd.DataFrame,
+        llama_tokenizer,
+        batch_size: int = 8,
+        train_split: float = 0.8,
+        val_split: float = 0.1,
+        test_split: float = 0.1,
+        noise_std: float = 0.01,
+        random_state: Optional[int] = 42,
+        stratify_column: Optional[str] = None,
+        num_workers: int = 0,
+        pin_memory: Optional[bool] = None
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Setup train, validation, and test dataloaders with proper random splitting.
 
-    # Split data
-    n_train = int(len(latent_features) * train_split)
+    Args:
+        latent_features: Array of latent feature vectors
+        metadata_df: DataFrame containing metadata for each sample
+        llama_tokenizer: Tokenizer for text processing
+        batch_size: Batch size for all dataloaders
+        train_split: Proportion of data for training (default: 0.7)
+        val_split: Proportion of data for validation (default: 0.15)
+        test_split: Proportion of data for testing (default: 0.15)
+        noise_std: Standard deviation of noise to add to training data
+        random_state: Random seed for reproducible splits
+        stratify_column: Column name in metadata_df to stratify splits by (optional)
+        num_workers: Number of worker processes for data loading
+        pin_memory: Whether to pin memory for GPU transfer (auto-detected if None)
 
-    train_features = latent_features[:n_train]
-    train_metadata = metadata_df.iloc[:n_train]
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
 
-    val_features = latent_features[n_train:]
-    val_metadata = metadata_df.iloc[n_train:]
+    Raises:
+        ValueError: If splits don't sum to 1.0 or data lengths don't match
+    """
+
+    # Validate inputs
+    if not np.isclose(train_split + val_split + test_split, 1.0):
+        raise ValueError(f"Splits must sum to 1.0, got {train_split + val_split + test_split:.3f}")
+
+    if len(latent_features) != len(metadata_df):
+        raise ValueError(f"Feature and metadata lengths don't match: {len(latent_features)} vs {len(metadata_df)}")
+
+    if len(latent_features) == 0:
+        raise ValueError("Cannot create dataloaders from empty dataset")
+
+    # Auto-detect pin_memory if not specified
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
+
+    # Create indices for splitting
+    indices = np.arange(len(latent_features))
+
+    # Prepare stratification if specified
+    stratify_data = None
+    if stratify_column is not None:
+        if stratify_column not in metadata_df.columns:
+            raise ValueError(f"Stratify column '{stratify_column}' not found in metadata")
+        stratify_data = metadata_df[stratify_column].values
+
+    # First split: separate out test set
+    train_val_indices, test_indices = train_test_split(
+        indices,
+        test_size=test_split,
+        random_state=random_state,
+        stratify=stratify_data,
+        shuffle=True
+    )
+
+    # Second split: separate train and validation from remaining data
+    # Adjust validation proportion relative to remaining data
+    val_size_adjusted = val_split / (train_split + val_split)
+
+    # Prepare stratification for second split if needed
+    stratify_train_val = None
+    if stratify_data is not None:
+        stratify_train_val = stratify_data[train_val_indices]
+
+    train_indices, val_indices = train_test_split(
+        train_val_indices,
+        test_size=val_size_adjusted,
+        random_state=random_state,
+        stratify=stratify_train_val,
+        shuffle=True
+    )
+
+    # Extract data for each split
+    train_features = latent_features[train_indices]
+    train_metadata = metadata_df.iloc[train_indices].reset_index(drop=True)
+
+    val_features = latent_features[val_indices]
+    val_metadata = metadata_df.iloc[val_indices].reset_index(drop=True)
+
+    test_features = latent_features[test_indices]
+    test_metadata = metadata_df.iloc[test_indices].reset_index(drop=True)
+
+    # Print split information
+    print(f"Dataset split:")
+    print(f"  Train: {len(train_indices)} samples ({len(train_indices) / len(indices) * 100:.1f}%)")
+    print(f"  Val:   {len(val_indices)} samples ({len(val_indices) / len(indices) * 100:.1f}%)")
+    print(f"  Test:  {len(test_indices)} samples ({len(test_indices) / len(indices) * 100:.1f}%)")
 
     # Create datasets
     train_dataset = StarDataset(
-        train_features, train_metadata, llama_tokenizer, noise_std=noise_std
+        train_features,
+        train_metadata,
+        llama_tokenizer,
+        noise_std=noise_std
     )
 
     val_dataset = StarDataset(
-        val_features, val_metadata, llama_tokenizer, noise_std=0.0  # No noise for validation
+        val_features,
+        val_metadata,
+        llama_tokenizer,
+        noise_std=0.0  # No noise for validation
     )
 
-    # Create dataloaders with num_workers=0 to avoid pickling issues on Windows
+    test_dataset = StarDataset(
+        test_features,
+        test_metadata,
+        llama_tokenizer,
+        noise_std=0.0  # No noise for testing
+    )
+
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=True,  # Shuffle training data
         collate_fn=collate_fn,
-        num_workers=0,  # Changed from 2 to 0
-        pin_memory=True if torch.cuda.is_available() else False
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True  # Drop incomplete batches for training stability
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=False,  # Don't shuffle validation data
         collate_fn=collate_fn,
-        num_workers=0,  # Changed from 2 to 0
-        pin_memory=True if torch.cuda.is_available() else False
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False  # Keep all validation samples
     )
 
-    return train_loader, val_loader
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,  # Don't shuffle test data
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False  # Keep all test samples
+    )
+
+    return train_loader, val_loader, test_loader
 
 
 if __name__ == "__main__":
