@@ -3,7 +3,6 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 from typing import Optional, List
-from data.star_dataset import LatentFeatureEncoder
 
 TOKENIZER_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B\tokenizer.model"
 MODEL_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B"
@@ -45,6 +44,31 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .expand(bs, slen, n_kv_heads, n_rep, head_dim)
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
+
+
+class LatentFeatureEncoder(nn.Module):
+    """MLP encoder to project latent features to token embedding space"""
+
+    def __init__(self, latent_dim: int, embedding_dim: int, hidden_dim: int = 512):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, embedding_dim)
+        )
+
+    def forward(self, latent_features: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            latent_features: (batch_size, latent_dim) or (latent_dim,)
+        Returns:
+            embeddings: (batch_size, embedding_dim) or (embedding_dim,)
+        """
+        return self.encoder(latent_features)
 
 
 class MultimodalLlamaModel(nn.Module):
@@ -252,6 +276,7 @@ class MultimodalLlamaModel(nn.Module):
                           question_tokens: List[int],
                           latent_features: torch.Tensor,
                           tokenizer,
+                          special_token_pos: int,
                           max_new_tokens: int = 100,
                           temperature: float = 0.7,
                           top_p: float = 0.9,
@@ -263,29 +288,24 @@ class MultimodalLlamaModel(nn.Module):
             question_tokens: List of token IDs for the question
             latent_features: (latent_dim,) features for this star
             tokenizer: The tokenizer
+            special_token_pos: Special token position
             max_new_tokens: Maximum number of new tokens to generate
             temperature: Sampling temperature
             top_p: Top-p sampling threshold
+            device: Device to use
 
         Returns:
             Generated response text
         """
-        self.eval()
+        # self.eval()
 
-        # Find special token position
-        special_token_pos = -1
-        for i, token_id in enumerate(question_tokens):
-            try:
-                decoded = tokenizer.decode([token_id])
-                if self.special_token in decoded:
-                    special_token_pos = i
-                    break
-            except:
-                continue
+        # Find special token position using improved method
+        # special_token_pos = self._find_special_token_position(question_tokens, tokenizer)
 
-        if special_token_pos == -1:
-            print(f"Warning: Special token '{self.special_token}' not found in question")
-            special_token_pos = len(question_tokens) - 1  # Use last position as fallback
+        print(f"Debug: Special token position found at index {special_token_pos}")
+        if special_token_pos < len(question_tokens):
+            token_at_pos = tokenizer.decode([question_tokens[special_token_pos]])
+            print(f"Debug: Token at position {special_token_pos}: '{token_at_pos}'")
 
         # Convert to tensors
         current_tokens = torch.tensor([question_tokens], dtype=torch.long, device=device)
@@ -325,9 +345,6 @@ class MultimodalLlamaModel(nn.Module):
                 next_token = next_token.unsqueeze(0)
                 current_tokens = torch.cat([current_tokens, next_token], dim=1)
 
-                # Update special token position (it stays the same relative to the start)
-                # No need to update since we're only appending
-
         # Decode the full sequence
         generated_tokens = current_tokens[0].tolist()
         full_text = tokenizer.decode(generated_tokens)
@@ -340,6 +357,59 @@ class MultimodalLlamaModel(nn.Module):
             answer_text = full_text
 
         return answer_text
+
+    # def _find_special_token_position(self, question_tokens: List[int], tokenizer) -> int:
+    #     """
+    #     Find the position of the special token in the question tokens
+    #     Handles multi-token special tokens that get split by the tokenizer
+    #     """
+    #     # Method 1: Try to find the exact special token ID if it exists as single token
+    #     try:
+    #         special_token_id = tokenizer.encode(self.special_token, bos=False, eos=False)[0]
+    #         if special_token_id in question_tokens:
+    #             return question_tokens.index(special_token_id)
+    #     except:
+    #         pass
+    #
+    #     # Method 2: Reconstruct text and find special token position
+    #     try:
+    #         # Decode the full question
+    #         question_text = tokenizer.decode(question_tokens)
+    #
+    #         # Find where the special token appears in the text
+    #         special_token_start = question_text.find(self.special_token)
+    #         if special_token_start != -1:
+    #             # Find which token position corresponds to this character position
+    #             char_count = 0
+    #             for i, token_id in enumerate(question_tokens):
+    #                 token_text = tokenizer.decode([token_id])
+    #                 if char_count <= special_token_start < char_count + len(token_text):
+    #                     return i
+    #                 char_count += len(token_text)
+    #     except:
+    #         pass
+    #
+    #     # Method 3: Look for token sequences that spell out the special token
+    #     special_token_parts = tokenizer.encode(self.config['special_token'], bos=False, eos=False)
+    #     if len(special_token_parts) > 1:
+    #         # Look for the sequence of tokens
+    #         for i in range(len(question_tokens) - len(special_token_parts) + 1):
+    #             if question_tokens[i:i + len(special_token_parts)] == special_token_parts:
+    #                 return i  # Return position of first token in sequence
+    #
+    #     # Method 4: Fallback - look for partial matches
+    #     for i, token_id in enumerate(question_tokens):
+    #         try:
+    #             decoded = tokenizer.decode([token_id])
+    #             if any(part in decoded for part in ['<STAR', 'STAR_', '_DATA', 'DATA>']):
+    #                 return i
+    #         except:
+    #             continue
+    #
+    #     print(f"Warning: Special token '{self.special_token}' not found in question")
+    #     print(f"Question tokens: {question_tokens}")
+    #     print(f"Decoded tokens: {[tokenizer.decode([t]) for t in question_tokens]}")
+    #     return len(question_tokens) - 1  # Use last position as fallback
 
     def _sample_top_p(self, probs: torch.Tensor, p: float) -> torch.Tensor:
         """Top-p (nucleus) sampling"""

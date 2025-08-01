@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -183,7 +184,7 @@ class StarLlamaTrainer:
             'train_split': 0.8,
             'save_every_n_epochs': 2,
             'eval_every_n_steps': 50,
-            'special_token': '<STAR_DATA>',
+            'special_token': 'STAR',
             'weight_decay': 0.01,
             'max_grad_norm': 1.0,
 
@@ -241,9 +242,12 @@ class StarLlamaTrainer:
         """Setup all components for training"""
         print("Setting up training components...")
 
-        # Load tokenizer
+        # Load tokenizer with custom special token
         print("Loading tokenizer...")
         self.tokenizer = Tokenizer(model_path=self.tokenizer_path)
+
+        # print(f"Added custom special token: {self.config['special_token']} "
+        #       f"(ID: {self.tokenizer.get_custom_token_id(self.config['special_token'])})")
 
         # Load base LLaMA model
         print("Loading base model...")
@@ -282,6 +286,7 @@ class StarLlamaTrainer:
             self.latent_features,
             self.metadata_df,
             self.tokenizer,
+            self.config['special_token'],
             batch_size=self.config['batch_size'],
             noise_std=self.config['noise_std']
         )
@@ -752,9 +757,208 @@ class StarLlamaTrainer:
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         return checkpoint
 
-    def evaluate_on_samples(self, num_samples: int = 10):
-        """Evaluate model on a few samples and print results"""
-        print(f"\n--- Evaluating on {num_samples} samples ---")
+    def evaluate_latent_interpretability(self, num_samples: int = 5):
+        """
+        Conservative approach to interpreting latent features using the LLM
+        Focuses on confidence, comparisons, and validation rather than specific dimension attribution
+        """
+        print(f"\n--- Latent Feature Interpretability Analysis ({num_samples} samples) ---")
+
+        self.model.eval()
+        samples_data = []
+
+        # Collect samples and their predictions
+        with torch.no_grad():
+            for i in range(min(num_samples, len(self.test_loader.dataset))):
+                sample = self.val_loader.dataset[i]
+                latent_features = sample['latent_features']
+
+                # Get basic prediction
+                question = f"Analyze this stellar object {self.config['special_token']} and provide temperature, gravity, and luminosity estimates."
+                question_tokens = self.tokenizer.encode(question, bos=True, eos=False)
+
+                prediction = self.model.generate_response(
+                    question_tokens,
+                    latent_features,
+                    self.tokenizer,
+                    max_new_tokens=60,
+                    temperature=0.5,
+                    device=self.device
+                )
+
+                samples_data.append({
+                    'index': i,
+                    'latent': latent_features,
+                    'prediction': prediction,
+                    'expected': sample['answer_text'],
+                    'latent_stats': {
+                        'mean': float(latent_features.mean()),
+                        'std': float(latent_features.std()),
+                        'min': float(latent_features.min()),
+                        'max': float(latent_features.max())
+                    }
+                })
+
+        # 1. CONFIDENCE ANALYSIS
+        print("\n" + "=" * 50)
+        print("1. CONFIDENCE & UNCERTAINTY ANALYSIS")
+        print("=" * 50)
+
+        for sample in samples_data:
+            print(f"\n--- Sample {sample['index'] + 1} ---")
+            print(f"Prediction: {sample['prediction']}")
+            print(f"Expected: {sample['expected']}")
+
+            # Ask about confidence levels
+            confidence_questions = [
+                f"How confident are you in your temperature estimate for {self.config['special_token']}? What makes you certain or uncertain?",
+                f"Which parameter (temperature, gravity, or luminosity) are you most confident about for {self.config['special_token']} and why?",
+                f"Are there any aspects of {self.config['special_token']} that seem ambiguous or contradictory for classification?"
+            ]
+
+            for q in confidence_questions[:2]:  # Ask 2 confidence questions per sample
+                q_tokens = self.tokenizer.encode(q, bos=True, eos=False)
+                confidence_response = self.model.generate_response(
+                    q_tokens,
+                    sample['latent'],
+                    self.tokenizer,
+                    max_new_tokens=50,
+                    temperature=0.4,
+                    device=self.device
+                )
+                print(f"Q: {q}")
+                print(f"A: {confidence_response}")
+
+        # 2. COMPARATIVE ANALYSIS
+        print("\n" + "=" * 50)
+        print("2. COMPARATIVE ANALYSIS")
+        print("=" * 50)
+
+        # Compare pairs of samples
+        for i in range(min(3, len(samples_data) - 1)):  # Compare up to 3 pairs
+            sample_a = samples_data[i]
+            sample_b = samples_data[i + 1]
+
+            print(f"\n--- Comparing Sample {sample_a['index'] + 1} vs Sample {sample_b['index'] + 1} ---")
+            print(f"Sample A: {sample_a['prediction']}")
+            print(f"Sample B: {sample_b['prediction']}")
+
+            # Create comparison prompt with both latent representations
+            comparison_q = f"Compare these two stellar objects. Object A: {self.config['special_token']} Object B: {self.config['special_token']} What are the key differences that lead to different classifications?"
+
+            # For comparison, we'll use sample A's latent (limitation: can't easily pass two latents)
+            # This is a known limitation we'll note
+            comp_tokens = self.tokenizer.encode(comparison_q, bos=True, eos=False)
+            comparison_response = self.model.generate_response(
+                comp_tokens,
+                sample_a['latent'],  # Using first sample's latent
+                self.tokenizer,
+                max_new_tokens=70,
+                temperature=0.4,
+                device=self.device
+            )
+
+            print(f"Q: {comparison_q}")
+            print(f"A: {comparison_response}")
+            print(f"Note: Comparison limited to single latent input")
+
+        # 3. PERTURBATION-STYLE QUESTIONS
+        print("\n" + "=" * 50)
+        print("3. PERTURBATION & SENSITIVITY ANALYSIS")
+        print("=" * 50)
+
+        for sample in samples_data[:3]:  # Analyze first 3 samples
+            print(f"\n--- Sample {sample['index'] + 1} Sensitivity ---")
+            print(f"Original: {sample['prediction']}")
+
+            # Ask about what would change the assessment
+            perturbation_questions = [
+                f"If the encoded stellar data in {self.config['special_token']} represented a much hotter star, what would be different in your analysis?",
+                f"What changes in {self.config['special_token']} would make you classify this as a giant star instead?",
+                f"If {self.config['special_token']} had stronger metallicity signatures, how would your assessment change?"
+            ]
+
+            for q in perturbation_questions[:2]:  # Ask 2 perturbation questions
+                q_tokens = self.tokenizer.encode(q, bos=True, eos=False)
+                pert_response = self.model.generate_response(
+                    q_tokens,
+                    sample['latent'],
+                    self.tokenizer,
+                    max_new_tokens=60,
+                    temperature=0.4,
+                    device=self.device
+                )
+                print(f"Q: {q}")
+                print(f"A: {pert_response}")
+
+        # 4. STATISTICAL ANALYSIS OF LATENT SPACE
+        print("\n" + "=" * 50)
+        print("4. LATENT SPACE STATISTICAL ANALYSIS")
+        print("=" * 50)
+
+        # Analyze the relationship between latent statistics and predictions
+        for sample in samples_data:
+            stats = sample['latent_stats']
+            print(f"\nSample {sample['index'] + 1}:")
+            print(
+                f"  Latent Stats: mean={stats['mean']:.3f}, std={stats['std']:.3f}, range=[{stats['min']:.3f}, {stats['max']:.3f}]")
+            print(f"  Prediction: {sample['prediction']}")
+
+            # Ask about the relationship between statistics and predictions
+            stats_q = f"The encoded data {self.config['special_token']} has an average value of {stats['mean']:.2f} and varies by {stats['std']:.2f}. Does this pattern suggest anything about the star type?"
+            stats_tokens = self.tokenizer.encode(stats_q, bos=True, eos=False)
+            stats_response = self.model.generate_response(
+                stats_tokens,
+                sample['latent'],
+                self.tokenizer,
+                max_new_tokens=50,
+                temperature=0.4,
+                device=self.device
+            )
+            print(f"  Q: {stats_q}")
+            print(f"  A: {stats_response}")
+
+        # 5. VALIDATION QUESTIONS
+        print("\n" + "=" * 50)
+        print("5. VALIDATION & CONSISTENCY CHECK")
+        print("=" * 50)
+
+        for sample in samples_data[:2]:  # Validate first 2 samples
+            print(f"\n--- Sample {sample['index'] + 1} Validation ---")
+
+            # Ask the same question multiple times to check consistency
+            base_q = f"What type of star is represented by {self.config['special_token']}?"
+            responses = []
+
+            for temp in [0.3, 0.7]:  # Different temperatures
+                q_tokens = self.tokenizer.encode(base_q, bos=True, eos=False)
+                response = self.model.generate_response(
+                    q_tokens,
+                    sample['latent'],
+                    self.tokenizer,
+                    max_new_tokens=40,
+                    temperature=temp,
+                    device=self.device
+                )
+                responses.append(f"T={temp}: {response}")
+
+            print(f"Original: {sample['prediction']}")
+            for response in responses:
+                print(f"Consistency Check - {response}")
+
+        print("\n" + "=" * 50)
+        print("INTERPRETABILITY ANALYSIS COMPLETE")
+        print("=" * 50)
+        print("\nKey Insights to Look For:")
+        print("1. Does the model show consistent confidence patterns?")
+        print("2. Are comparisons between samples physically reasonable?")
+        print("3. Do perturbation responses make sense?")
+        print("4. Is there correlation between latent statistics and predictions?")
+        print("5. Are responses consistent across different temperatures?")
+
+    def evaluate_on_samples(self, num_samples: int = 10, include_followup: bool = True):
+        """Evaluate model on a few samples and print results with optional follow-up questions"""
+        print(f"\n--- Standard Evaluation on {num_samples} samples ---")
 
         self.model.eval()
         questions = [
@@ -763,27 +967,57 @@ class StarLlamaTrainer:
             f"What type of star is this {self.config['special_token']}?",
         ]
 
+        # Conservative follow-up questions focused on reasoning rather than specific features
+        followup_questions = [
+            f"What aspects of the stellar data make you most confident in your temperature estimate?",
+            f"Which of your estimates (temperature, gravity, luminosity) do you trust most and why?",
+            f"If you had to identify potential uncertainties in your analysis, what would they be?",
+            f"How does this star compare to a typical solar-type star in your assessment?",
+        ]
+
         with torch.no_grad():
             for i in range(min(num_samples, len(self.test_loader.dataset))):
-                sample = self.val_loader.dataset[i]
+                sample = self.test_loader.dataset[i]
                 question = str(np.random.choice(questions))
                 question_tokens = self.tokenizer.encode(question, bos=True, eos=False)
 
+                # Generate initial response
                 response = self.model.generate_response(
                     question_tokens,
                     sample['latent_features'],
                     self.tokenizer,
+                    sample['special_token_positions'],
                     max_new_tokens=50,
                     temperature=0.7,
                     device=self.device
                 )
 
                 print(f"\nSample {i + 1}:")
-                print(f"Question: {question}")
-                print(f"Generated: {response}")
-                print(f"Expected: {sample['answer_text']}")
+                print(f"Initial Question: {question}")
+                print(f"Generated Response: {response}")
+                print(f"Expected Answer: {sample['answer_text']}")
 
-        print("--- End Evaluation ---\n")
+                # Generate follow-up explanation if requested
+                if include_followup:
+                    followup_question = str(np.random.choice(followup_questions))
+
+                    # Create a more explicit conversation context
+                    conversation_context = f"Q: {question}\nA: {response}\nQ: {followup_question}\nA:"
+                    followup_tokens = self.tokenizer.encode(conversation_context, bos=True, eos=False)
+
+                    # Generate explanation response
+                    explanation = self.model.generate_response(
+                        followup_tokens,
+                        sample['latent_features'],
+                        self.tokenizer,
+                        max_new_tokens=60,
+                        temperature=0.5,
+                        device=self.device
+                    )
+
+                    print(f"Follow-up Question: {followup_question}")
+                    print(f"Explanation: {explanation}")
+
 
     def print_model_status(self):
         """Print current model parameter status"""
@@ -840,9 +1074,10 @@ def main(num_samples=5000):
 
     # Configuration for progressive training with LoRA and early stopping
     config = {
+        'special_token': ' STAR',
         'batch_size': 4,
         'learning_rate': 5e-4,  # Higher LR for LoRA
-        'num_epochs': 50,  # Set high, early stopping will handle it
+        'num_epochs': 10,  # Set high, early stopping will handle it
         'max_sequence_length': 256,
         'noise_std': 0.02,
         'train_split': 0.8,
@@ -856,7 +1091,7 @@ def main(num_samples=5000):
 
         # Progressive training: start with encoder only, then LoRA
         'freeze_strategy': 'lora',
-        'encoder_only_epochs': 0,  # Switch to LoRA after 3 epochs
+        'encoder_only_epochs': 3,  # Switch to LoRA after 3 epochs
         'encoder_lr_multiplier': 1.0,
         'lora_lr_multiplier': 1.0,
 
@@ -901,7 +1136,7 @@ def main(num_samples=5000):
     # Create trainer
     trainer = StarLlamaTrainer(
         model_checkpoint_path=model_checkpoint_path,
-        multimodal_checkpoints=multimmodal_checkpoints,
+        multimodal_checkpoints=None,
         tokenizer_path=tokenizer_path,
         latent_features=latent_features,
         metadata_df=metadata_df,
@@ -941,8 +1176,11 @@ def main(num_samples=5000):
         # Train with automatic freeze strategy transitions and early stopping
         trainer.train()
 
-        # Final evaluation
-        trainer.evaluate_on_samples(num_samples=10)
+        # Standard evaluation
+        trainer.evaluate_on_samples(num_samples=5, include_followup=True)
+
+        # Comprehensive latent interpretability analysis
+        trainer.evaluate_latent_interpretability(num_samples=4)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
@@ -959,4 +1197,4 @@ def main(num_samples=5000):
 
 
 if __name__ == "__main__":
-    main(100)
+    main()

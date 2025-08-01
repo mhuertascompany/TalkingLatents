@@ -10,87 +10,132 @@ import torch.nn as nn
 
 
 def get_stellar_type(temperature, luminosity):
-    """
-    Returns stellar type based on temperature (K) and luminosity (solar luminosities).
-
-    Args:
-        temperature (float): Effective temperature in Kelvin
-        luminosity (float): Luminosity in solar luminosities
-
-    Returns:
-        str: Stellar classification (O, B, A, F, G, K, or M)
-    """
-
-    # Check each stellar class from hottest to coolest
-    # Using luminosity ranges from the table
+    """Returns stellar type based on temperature (K) and luminosity (solar luminosities)."""
     if temperature >= 33000 and luminosity >= 30000:
         return "O"
-
     elif 10000 <= temperature < 33000 and 25 <= luminosity <= 30000:
         return "B"
-
     elif 7300 <= temperature < 10000 and 5 <= luminosity <= 25:
         return "A"
-
     elif 6000 <= temperature < 7300 and 1.5 <= luminosity <= 5:
         return "F"
-
     elif 5300 <= temperature < 6000 and 0.6 <= luminosity <= 1.5:
         return "G"
-
     elif 3900 <= temperature < 5300 and 0.08 <= luminosity <= 0.6:
         return "K"
-
     elif 2300 <= temperature < 3900 and luminosity <= 0.08:
         return "M"
-
     else:
-        return "Unknown"  # Outside normal main sequence ranges
+        return "Unknown"
 
-class LatentFeatureEncoder(nn.Module):
-    """MLP encoder to project latent features to token embedding space"""
 
-    def __init__(self, latent_dim: int, embedding_dim: int, hidden_dim: int = 512):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, embedding_dim)
-        )
+class LatentFeatureAnalyzer:
+    """Utility class to analyze latent features and generate interpretable descriptions"""
 
-    def forward(self, latent_features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            latent_features: (batch_size, latent_dim) or (latent_dim,)
-        Returns:
-            embeddings: (batch_size, embedding_dim) or (embedding_dim,)
-        """
-        return self.encoder(latent_features)
+    def __init__(self, feature_dim: int):
+        self.feature_dim = feature_dim
+        self.temperature_correlations = {}  # Could be learned from data
+        self.gravity_correlations = {}
+
+    def analyze_features(self, latent_features: np.ndarray) -> Dict[str, any]:
+        """Analyze latent features and return interpretable properties"""
+
+        # Basic statistics
+        mean_activation = float(np.mean(latent_features))
+        std_activation = float(np.std(latent_features))
+        max_activation = float(np.max(latent_features))
+        min_activation = float(np.min(latent_features))
+
+        # Find most active dimensions
+        abs_features = np.abs(latent_features)
+        top_5_dims = np.argsort(abs_features)[-5:].tolist()
+        top_5_values = abs_features[top_5_dims].tolist()
+
+        # Find least active dimensions
+        bottom_5_dims = np.argsort(abs_features)[:5].tolist()
+        bottom_5_values = abs_features[bottom_5_dims].tolist()
+
+        # Sparsity analysis
+        near_zero_count = int(np.sum(abs_features < 0.1))
+        sparsity_ratio = near_zero_count / len(latent_features)
+
+        # Activity patterns
+        positive_dims = int(np.sum(latent_features > 0.5))
+        negative_dims = int(np.sum(latent_features < -0.5))
+
+        # Clustering/grouping (simple version)
+        high_activity_regions = []
+        for i in range(0, len(latent_features), 10):  # Group in chunks of 10
+            chunk = latent_features[i:i + 10]
+            if np.mean(np.abs(chunk)) > mean_activation + std_activation:
+                high_activity_regions.append(f"{i}-{min(i + 9, len(latent_features) - 1)}")
+
+        return {
+            'mean_activation': mean_activation,
+            'std_activation': std_activation,
+            'max_activation': max_activation,
+            'min_activation': min_activation,
+            'top_5_dims': top_5_dims,
+            'top_5_values': top_5_values,
+            'bottom_5_dims': bottom_5_dims,
+            'bottom_5_values': bottom_5_values,
+            'sparsity_ratio': sparsity_ratio,
+            'positive_dims': positive_dims,
+            'negative_dims': negative_dims,
+            'high_activity_regions': high_activity_regions,
+            'activation_range': max_activation - min_activation
+        }
+
+    def generate_latent_description(self, latent_analysis: Dict, stellar_params: Dict) -> str:
+        """Generate natural language description of latent features in context of stellar parameters"""
+
+        descriptions = []
+
+        # Overall activation pattern
+        if latent_analysis['mean_activation'] > 0.5:
+            descriptions.append("strong overall feature activation")
+        elif latent_analysis['mean_activation'] < -0.5:
+            descriptions.append("predominantly negative feature responses")
+        else:
+            descriptions.append("balanced feature activation")
+
+        # Sparsity information
+        if latent_analysis['sparsity_ratio'] > 0.7:
+            descriptions.append("sparse representation with few active features")
+        elif latent_analysis['sparsity_ratio'] < 0.3:
+            descriptions.append("dense representation with many active features")
+
+        # Top dimensions
+        top_dims_str = ", ".join(map(str, latent_analysis['top_5_dims'][:3]))
+        descriptions.append(f"peak responses in dimensions {top_dims_str}")
+
+        # Regional activity
+        if latent_analysis['high_activity_regions']:
+            regions_str = ", ".join(latent_analysis['high_activity_regions'][:2])
+            descriptions.append(f"concentrated activity in regions {regions_str}")
+
+        # Connect to stellar parameters (this is where interpretability magic happens)
+        temp = stellar_params.get('Teff', 0)
+        if temp > 6000:
+            descriptions.append("consistent with hot star signatures")
+        elif temp < 4000:
+            descriptions.append("matching cool star patterns")
+
+        return "; ".join(descriptions)
 
 
 class StarDataset(Dataset):
-    """Dataset for star QA with latent features and text descriptions"""
+    """Enhanced dataset with latent feature descriptions"""
 
     def __init__(self,
                  latent_features: np.ndarray,
                  metadata_df: pd.DataFrame,
                  llama_tokenizer,
                  max_sequence_length: int = 512,
-                 special_token: str = "<STAR_DATA>",
-                 noise_std: float = 0.01):
-        """
-        Args:
-            latent_features: Array of shape (n_samples, latent_dim)
-            metadata_df: DataFrame with columns like 'Teff', 'logg', 'type', etc.
-            llama_tokenizer: LLaMA tokenizer
-            max_sequence_length: Maximum sequence length for the model
-            special_token: Special token to mark where latent data should be inserted
-            noise_std: Standard deviation of Gaussian noise to add to features
-        """
+                 special_token: str = "STAR",
+                 noise_std: float = 0.01,
+                 include_latent_analysis: bool = True):
+
         assert len(latent_features) == len(metadata_df), "Features and metadata must have same length"
 
         self.latent_features = latent_features
@@ -99,40 +144,38 @@ class StarDataset(Dataset):
         self.max_sequence_length = max_sequence_length
         self.special_token = special_token
         self.noise_std = noise_std
+        self.include_latent_analysis = include_latent_analysis
 
-        # Add special token to LLaMA tokenizer if not present
-        if special_token not in llama_tokenizer.special_tokens:
-            self.special_token_id = max(llama_tokenizer.special_tokens.values()) + 1
-        else:
-            self.special_token_id = llama_tokenizer.special_tokens[special_token]
+        # Initialize latent analyzer
+        self.latent_analyzer = LatentFeatureAnalyzer(latent_features.shape[1])
 
-        # Question templates - asking about the star
+        # Enhanced question templates
         self.question_templates = [
             f"Describe the physical parameters of this star {special_token}",
             f"What are the characteristics of this stellar object {special_token}?",
             f"Analyze the properties of this star {special_token}",
-            f"Tell me about this star's temperature and gravity {special_token}",
             f"What type of star is this {special_token}?",
-            f"Provide the stellar classification for {special_token}",
-            f"Characterize this stellar object {special_token}",
-            f"What are the main properties of this star {special_token}?",
-            f"Describe the stellar parameters of {special_token}",
-            f"Give me the physical characteristics of this star {special_token}",
+            f"Explain the stellar parameters and their encoding for {special_token}",
+            f"Describe both the physical properties and latent representation of {special_token}",
+            f"What do the encoded features reveal about this star {special_token}?",
+            f"Interpret the stellar classification and feature patterns of {special_token}",
         ]
 
-        # Answer templates - describing the star
-        self.answer_templates = [
-            "This star has an effective temperature of {Teff:.0f} K, Luminosity {Lstar:.2f} and surface gravity log(g) = {logg:.2f}. It is classified as a {type} star.",
-            "The stellar object shows Teff = {Teff:.0f} K, Luminosity = {Lstar:.2f}, and logg = {logg:.2f}, and belongs to the {type} spectral class.",
-            "This {type} star exhibits a temperature of {Teff:.0f} K with log(g) = {logg:.2f} and Luminosity = {Lstar:.2f}.",
-            "Physical parameters: effective temperature {Teff:.0f} K, surface gravity log(g) {logg:.2f}, Luminosity {Lstar:.2f}. Spectral type: {type}.",
-            "The star is a {type} with Teff = {Teff:.0f} K, Luminosity = {Lstar:.2f} and logg = {logg:.2f}.",
-            "Stellar classification: {type}. Temperature: {Teff:.0f} K. Luminosity = {Lstar:.2f}. Surface gravity: log(g) = {logg:.2f}.",
-            "This is a {type} star characterized by Teff = {Teff:.0f} K, Luminosity = {Lstar:.2f}, and log(g) = {logg:.2f}.",
-            "The object is classified as a {type} star with effective temperature {Teff:.0f} K, Luminosity = {Lstar:.2f} and surface gravity log(g) = {logg:.2f}.",
-            "Properties: {type} spectral class, {Teff:.0f} K effective temperature, {Lstar:.2f} Luminosity, log(g) = {logg:.2f}.",
-            "This stellar object belongs to the {type} class with Teff = {Teff:.0f} K, Luminosity = {Lstar:.2f}, and logg = {logg:.2f}.",
+        # Basic answer templates (original)
+        self.basic_answer_templates = [
+            "This star has an effective temperature of {Teff:.0f} K, Luminosity {Lstar:.2f} and surface gravity log(g) = {logg:.2f}. It is classified as a {stellar_type} star.",
+            "Physical parameters: effective temperature {Teff:.0f} K, surface gravity log(g) {logg:.2f}, Luminosity {Lstar:.2f}. Spectral type: {stellar_type}.",
+            "Properties: {stellar_type} spectral class, {Teff:.0f} K effective temperature, {Lstar:.2f} Luminosity, log(g) = {logg:.2f}.",
         ]
+
+        # Enhanced templates with latent analysis
+        self.enhanced_answer_templates = [
+            "This star has Teff={Teff:.0f}K, log(g)={logg:.2f}, Luminosity={Lstar:.2f} ({stellar_type} class). The encoded representation shows {latent_description}.",
+            "Stellar classification: {stellar_type}. Temperature: {Teff:.0f} K. Luminosity = {Lstar:.2f}. Surface gravity: log(g) = {logg:.2f}. The latent encoding exhibits {latent_description}.",
+            "Physical parameters: Teff={Teff:.0f}K, log(g)={logg:.2f}, L={Lstar:.2f}. Classification: {stellar_type}. Feature analysis reveals {latent_description}.",
+            "This {stellar_type} star (T={Teff:.0f}K, log(g)={logg:.2f}, L={Lstar:.2f}) shows {latent_description} in its encoded representation.",
+        ]
+
     def __len__(self) -> int:
         return len(self.latent_features)
 
@@ -146,47 +189,87 @@ class StarDataset(Dataset):
     def _find_special_token_position(self, tokens: List[int]) -> Optional[int]:
         """Find the position of the special token in the token sequence"""
 
-        # Method 1: Try to find by tokenizing the special token separately
+        # Method 1: Look for the exact special token ID
+        if hasattr(self.llama_tokenizer, 'get_custom_token_id'):
+            try:
+                special_token_id = self.llama_tokenizer.get_custom_token_id(self.special_token)
+                if special_token_id in tokens:
+                    return tokens.index(special_token_id)
+            except:
+                pass
+
+        # Method 2: Handle space variants - tokenize both with and without leading space
+        special_token_variants = [
+            self.special_token,  # "STAR"
+            f" {self.special_token}",  # " STAR"
+            f"_{self.special_token}",  # "_STAR" (sometimes used)
+            f"<{self.special_token}>",  # "<STAR>" (if using brackets)
+        ]
+
+        for variant in special_token_variants:
+            try:
+                variant_tokens = self.llama_tokenizer.encode(variant, bos=False, eos=False)
+
+                # Look for this sequence in the tokens
+                for i in range(len(tokens) - len(variant_tokens) + 1):
+                    if tokens[i:i + len(variant_tokens)] == variant_tokens:
+                        # print(f"Found special token variant '{variant}' at position {i}")
+                        return i
+
+                # Also check for single token match
+                if len(variant_tokens) == 1 and variant_tokens[0] in tokens:
+                    pos = tokens.index(variant_tokens[0])
+                    # print(f"Found single token variant '{variant}' (ID: {variant_tokens[0]}) at position {pos}")
+                    return pos
+
+            except Exception as e:
+                continue
+
+        # Method 3: Decode and search by string matching
         try:
-            special_token_ids = self.llama_tokenizer.encode(self.special_token, bos=False, eos=False)
+            full_text = self.llama_tokenizer.decode(tokens)
 
-            # Look for this sequence in the tokens
-            for i in range(len(tokens) - len(special_token_ids) + 1):
-                if tokens[i:i + len(special_token_ids)] == special_token_ids:
-                    return i
+            # Look for any variant in the decoded text
+            for variant in [self.special_token, f" {self.special_token}"]:
+                if variant in full_text:
+                    char_pos = full_text.find(variant)
+
+                    # Convert character position to approximate token position
+                    # This is a rough estimation
+                    approx_token_pos = 0
+                    char_count = 0
+
+                    for i, token_id in enumerate(tokens):
+                        token_text = self.llama_tokenizer.decode([token_id])
+                        if char_count <= char_pos < char_count + len(token_text):
+                            # print(f"Found special token by string matching at approximate position {i}")
+                            return i
+                        char_count += len(token_text)
+
         except Exception as e:
-            print(f"Method 1 failed: {e}")
+            print(f"String matching failed: {e}")
 
-        # Method 2: Decode each token and look for the special token string
+        # Method 4: Brute force - decode each token and check for substring
         for i, token_id in enumerate(tokens):
             try:
                 decoded = self.llama_tokenizer.decode([token_id])
                 if self.special_token in decoded:
+                    # print(f"Found special token '{self.special_token}' in token '{decoded}' at position {i}")
                     return i
-            except Exception as e:
+            except:
                 continue
 
-        # Method 3: Decode the entire sequence and try to find approximate position
-        try:
-            full_text = self.llama_tokenizer.decode(tokens)
-            if self.special_token in full_text:
-                # Find the character position
-                char_pos = full_text.find(self.special_token)
-
-                # Rough approximation: assume each token is about 3-4 characters
-                approx_token_pos = min(char_pos // 4, len(tokens) - 1)
-                return approx_token_pos
-        except Exception as e:
-            print(f"Method 3 failed: {e}")
-
-        # If all methods fail, print debug info
         print(f"Could not find special token '{self.special_token}' in sequence")
         print(f"Tokens: {tokens[:10]}...{tokens[-10:]} (showing first/last 10)")
-        try:
-            decoded_text = self.llama_tokenizer.decode(tokens)
-            print(f"Decoded text: '{decoded_text[:100]}...{decoded_text[-100:]}'")
-        except:
-            print("Could not decode tokens for debugging")
+
+        # Debug: Show what each token decodes to
+        print("Token decode debug:")
+        for i, token_id in enumerate(tokens[:15]):  # Show first 15 tokens
+            try:
+                decoded = self.llama_tokenizer.decode([token_id])
+                print(f"  {i}: {token_id} -> '{decoded}'")
+            except:
+                print(f"  {i}: {token_id} -> <decode failed>")
 
         return None
 
@@ -198,59 +281,81 @@ class StarDataset(Dataset):
         # Add noise to features
         noisy_features = self._add_noise_to_features(latent_vector)
 
-        # Choose random templates
-        question_template = random.choice(self.question_templates)
-        answer_template = random.choice(self.answer_templates)
+        # Analyze latent features
+        stellar_params = {
+            'Teff': metadata['Teff'],
+            'logg': metadata['logg'],
+            'Lstar': np.exp(metadata['Lstar'])
+        }
 
-        # Format question and answer
+        stellar_type = get_stellar_type(stellar_params['Teff'], stellar_params['Lstar'])
+
+        # Choose question template
+        question_template = random.choice(self.question_templates)
         question = question_template
-        answer = answer_template.format(
-            Teff=metadata['Teff'],
-            Lstar=np.exp(metadata['Lstar']),
-            logg=metadata['logg'],
-            type=get_stellar_type(metadata['Teff'], np.exp(metadata['Lstar']))
-        )
+
+        # Generate answer based on whether to include latent analysis
+        if self.include_latent_analysis and random.random() > 0.3:  # 70% chance for enhanced answers
+            # Analyze latent features
+            latent_analysis = self.latent_analyzer.analyze_features(latent_vector)
+            latent_description = self.latent_analyzer.generate_latent_description(
+                latent_analysis, stellar_params
+            )
+
+            answer_template = random.choice(self.enhanced_answer_templates)
+            answer = answer_template.format(
+                Teff=stellar_params['Teff'],
+                Lstar=stellar_params['Lstar'],
+                logg=stellar_params['logg'],
+                stellar_type=stellar_type,
+                latent_description=latent_description
+            )
+        else:
+            # Use basic answer template
+            answer_template = random.choice(self.basic_answer_templates)
+            answer = answer_template.format(
+                Teff=stellar_params['Teff'],
+                Lstar=stellar_params['Lstar'],
+                logg=stellar_params['logg'],
+                stellar_type=stellar_type
+            )
 
         # Tokenize question and answer
         question_tokens = self.llama_tokenizer.encode(question, bos=True, eos=False)
         answer_tokens = self.llama_tokenizer.encode(answer, bos=False, eos=True)
 
-        # Find special token position in question
+        # Find special token position
         special_token_pos = self._find_special_token_position(question_tokens)
 
-        # Create full sequence: question + answer
+        # Create full sequence
         full_sequence = question_tokens + answer_tokens
 
-        # Calculate where special token is in the full sequence
         if special_token_pos is not None:
             full_special_token_pos = special_token_pos
         else:
-            # If not found, set to -1 (will be handled in model)
             full_special_token_pos = -1
 
         # Truncate if too long
         if len(full_sequence) > self.max_sequence_length:
             full_sequence = full_sequence[:self.max_sequence_length]
 
-        # For training: input is question + answer[:-1], target is question[1:] + answer
-        # But we only want to compute loss on the answer part
         question_len = len(question_tokens)
 
         # Create input and target sequences
-        input_sequence = full_sequence[:-1]  # All except last token
-        target_sequence = full_sequence[1:]  # All except first token
+        input_sequence = full_sequence[:-1]
+        target_sequence = full_sequence[1:]
 
         # Create loss mask - only compute loss on answer tokens
         loss_mask = torch.zeros(len(target_sequence), dtype=torch.bool)
         if question_len < len(target_sequence):
-            loss_mask[question_len - 1:] = True  # Only answer part
+            loss_mask[question_len - 1:] = True
 
         return {
             'input_ids': torch.tensor(input_sequence, dtype=torch.long),
             'target_ids': torch.tensor(target_sequence, dtype=torch.long),
             'loss_mask': loss_mask,
             'latent_features': torch.tensor(noisy_features, dtype=torch.float32),
-            'special_token_pos': torch.tensor(full_special_token_pos, dtype=torch.long),
+            'special_token_positions': torch.tensor(full_special_token_pos, dtype=torch.long),
             'question_text': question,
             'answer_text': answer,
             'metadata': {key: metadata[key] for key in metadata.index}
@@ -314,14 +419,41 @@ class StarDataset(Dataset):
 
         print("=== End Debug ===\n")
 
+    def debug_enhanced_sample(self, sample_idx: int = 0):
+        """Debug enhanced sample generation"""
+        print(f"\n=== Enhanced Sample Debug (Sample {sample_idx}) ===")
+
+        latent_vector = self.latent_features[sample_idx]
+        metadata = self.metadata_df.iloc[sample_idx]
+
+        # Analyze features
+        latent_analysis = self.latent_analyzer.analyze_features(latent_vector)
+        stellar_params = {
+            'Teff': metadata['Teff'],
+            'logg': metadata['logg'],
+            'Lstar': np.exp(metadata['Lstar'])
+        }
+
+        print(f"Stellar parameters: {stellar_params}")
+        print(f"Latent analysis: {latent_analysis}")
+
+        latent_description = self.latent_analyzer.generate_latent_description(
+            latent_analysis, stellar_params
+        )
+        print(f"Generated description: {latent_description}")
+
+        # Generate sample
+        sample = self[sample_idx]
+        print(f"Question: {sample['question_text']}")
+        print(f"Answer: {sample['answer_text']}")
+
+        print("=== End Enhanced Debug ===\n")
+
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Custom collate function to handle variable length sequences"""
-
-    # Get maximum length in this batch
     max_len = max(len(item['input_ids']) for item in batch)
 
-    # Pad sequences
     input_ids = []
     target_ids = []
     loss_masks = []
@@ -332,29 +464,16 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         target_seq = item['target_ids']
         loss_mask = item['loss_mask']
 
-        # Pad input sequence
         pad_length = max_len - len(input_seq)
-        padded_input = torch.cat([
-            input_seq,
-            torch.zeros(pad_length, dtype=torch.long)
-        ])
 
-        # Pad target sequence
-        padded_target = torch.cat([
-            target_seq,
-            torch.full((pad_length,), -100, dtype=torch.long)  # -100 is ignore index for loss
-        ])
-
-        # Pad loss mask
-        padded_loss_mask = torch.cat([
-            loss_mask,
-            torch.zeros(pad_length, dtype=torch.bool)
-        ])
+        padded_input = torch.cat([input_seq, torch.zeros(pad_length, dtype=torch.long)])
+        padded_target = torch.cat([target_seq, torch.full((pad_length,), -100, dtype=torch.long)])
+        padded_loss_mask = torch.cat([loss_mask, torch.zeros(pad_length, dtype=torch.bool)])
 
         input_ids.append(padded_input)
         target_ids.append(padded_target)
         loss_masks.append(padded_loss_mask)
-        special_token_positions.append(item['special_token_pos'])
+        special_token_positions.append(item['special_token_positions'])
 
     return {
         'input_ids': torch.stack(input_ids),
@@ -367,10 +486,8 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     }
 
 
-# Example usage and testing
 def create_sample_data(n_samples: int = 1000, latent_dim: int = 128):
     """Create sample data for testing"""
-
     # Generate fake latent features
     latent_features = np.random.randn(n_samples, latent_dim)
 
@@ -380,11 +497,11 @@ def create_sample_data(n_samples: int = 1000, latent_dim: int = 128):
     metadata = {
         'Teff': np.random.uniform(3000, 10000, n_samples),  # Temperature in K
         'logg': np.random.uniform(1.0, 5.0, n_samples),  # Surface gravity
+        'Lstar': np.random.uniform(-2, 2, n_samples),  # Log luminosity
         'type': np.random.choice(star_types, n_samples)
     }
 
     metadata_df = pd.DataFrame(metadata)
-
     return latent_features, metadata_df
 
 
@@ -392,6 +509,7 @@ def setup_dataloaders(
         latent_features: np.ndarray,
         metadata_df: pd.DataFrame,
         llama_tokenizer,
+        special_token: str,
         batch_size: int = 8,
         train_split: float = 0.8,
         val_split: float = 0.1,
@@ -400,7 +518,8 @@ def setup_dataloaders(
         random_state: Optional[int] = 42,
         stratify_column: Optional[str] = None,
         num_workers: int = 0,
-        pin_memory: Optional[bool] = None
+        pin_memory: Optional[bool] = None,
+        include_latent_analysis: bool = True
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Setup train, validation, and test dataloaders with proper random splitting.
@@ -410,14 +529,15 @@ def setup_dataloaders(
         metadata_df: DataFrame containing metadata for each sample
         llama_tokenizer: Tokenizer for text processing
         batch_size: Batch size for all dataloaders
-        train_split: Proportion of data for training (default: 0.7)
-        val_split: Proportion of data for validation (default: 0.15)
-        test_split: Proportion of data for testing (default: 0.15)
+        train_split: Proportion of data for training (default: 0.8)
+        val_split: Proportion of data for validation (default: 0.1)
+        test_split: Proportion of data for testing (default: 0.1)
         noise_std: Standard deviation of noise to add to training data
         random_state: Random seed for reproducible splits
         stratify_column: Column name in metadata_df to stratify splits by (optional)
         num_workers: Number of worker processes for data loading
         pin_memory: Whether to pin memory for GPU transfer (auto-detected if None)
+        include_latent_analysis: Whether to include latent feature analysis in answers
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
@@ -497,21 +617,27 @@ def setup_dataloaders(
         train_features,
         train_metadata,
         llama_tokenizer,
-        noise_std=noise_std
+        special_token=special_token,
+        noise_std=noise_std,
+        include_latent_analysis=include_latent_analysis
     )
 
     val_dataset = StarDataset(
         val_features,
         val_metadata,
         llama_tokenizer,
-        noise_std=0.0  # No noise for validation
+        special_token=special_token,
+        noise_std=0.0,  # No noise for validation
+        include_latent_analysis=include_latent_analysis
     )
 
     test_dataset = StarDataset(
         test_features,
         test_metadata,
         llama_tokenizer,
-        noise_std=0.0  # No noise for testing
+        special_token=special_token,
+        noise_std=0.0,  # No noise for testing
+        include_latent_analysis=include_latent_analysis
     )
 
     # Create dataloaders
@@ -558,14 +684,5 @@ if __name__ == "__main__":
     print(f"Metadata columns: {list(metadata_df.columns)}")
     print(f"Sample metadata:\n{metadata_df.head()}")
 
-    # Example of a single sample
-    from llama3.llama.tokenizer import Tokenizer  # This would need your actual tokenizer
-    # tokenizer = Tokenizer(model_path="path/to/tokenizer.model")
-    # dataset = StarDataset(latent_features, metadata_df, tokenizer)
-    # sample = dataset[0]
-    # print(f"\nSample structure:")
-    # for key, value in sample.items():
-    #     if isinstance(value, torch.Tensor):
-    #         print(f"  {key}: shape {value.shape}, dtype {value.dtype}")
-    #     else:
-    #         print(f"  {key}: {value}")
+    # Example of enhanced dataset with latent analysis
+    print("\n=== Testing Enhanced Dataset ===")
