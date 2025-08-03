@@ -7,7 +7,58 @@ import random
 from sklearn.model_selection import train_test_split
 from dataclasses import dataclass
 import torch.nn as nn
+import re
 
+
+def identify_stellar_parameter_tokens(tokenizer, answer_text: str, answer_tokens: List[int]) -> List[bool]:
+    """
+    Identify which tokens in the answer correspond to stellar parameter values
+
+    Args:
+        tokenizer: The tokenizer used
+        answer_text: The full answer text
+        answer_tokens: List of token IDs for the answer
+
+    Returns:
+        List of booleans indicating which tokens are stellar parameter values
+    """
+    # Patterns to match stellar parameter values
+    patterns = [
+        r'(?:Teff[=\s]*|temperature[=\s]*|T[=\s]*)?(\d+(?:\.\d+)?)\s*K',  # Temperature
+        r'(?:logg[=\s]*|log\(g\)[=\s]*|gravity[=\s]*)?(\d+(?:\.\d+)?)',  # Surface gravity
+        r'(?:Lstar[=\s]*|L[=\s]*|luminosity[=\s]*)?(\d+(?:\.\d+)?)',  # Luminosity
+        r'(\d+(?:\.\d+)?)\s*(?:solar|L_sun|L☉)',  # Solar luminosity units
+    ]
+
+    # Find all parameter value positions in text
+    param_positions = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, answer_text, re.IGNORECASE):
+            start, end = match.span(1) if match.lastindex else match.span()
+            param_positions.append((start, end))
+
+    # Map character positions to token positions
+    token_mask = [False] * len(answer_tokens)
+    char_pos = 0
+
+    for i, token_id in enumerate(answer_tokens):
+        try:
+            token_text = tokenizer.decode([token_id])
+            token_start = char_pos
+            token_end = char_pos + len(token_text)
+
+            # Check if this token overlaps with any parameter value
+            for param_start, param_end in param_positions:
+                if (token_start < param_end and token_end > param_start):
+                    token_mask[i] = True
+                    break
+
+            char_pos = token_end
+        except:
+            # Skip problematic tokens
+            continue
+
+    return token_mask
 
 def get_stellar_type(temperature, luminosity):
     """Returns stellar type based on temperature (K) and luminosity (solar luminosities)."""
@@ -134,7 +185,7 @@ class StarDataset(Dataset):
                  max_sequence_length: int = 512,
                  special_token: str = "STAR",
                  noise_std: float = 0.01,
-                 include_latent_analysis: bool = True):
+                 include_latent_analysis: bool = False):
 
         assert len(latent_features) == len(metadata_df), "Features and metadata must have same length"
 
@@ -294,14 +345,12 @@ class StarDataset(Dataset):
         question_template = random.choice(self.question_templates)
         question = question_template
 
-        # Generate answer based on whether to include latent analysis
-        if self.include_latent_analysis and random.random() > 0.3:  # 70% chance for enhanced answers
-            # Analyze latent features
+        # Generate answer
+        if self.include_latent_analysis and random.random() > 0.3:
             latent_analysis = self.latent_analyzer.analyze_features(latent_vector)
             latent_description = self.latent_analyzer.generate_latent_description(
                 latent_analysis, stellar_params
             )
-
             answer_template = random.choice(self.enhanced_answer_templates)
             answer = answer_template.format(
                 Teff=stellar_params['Teff'],
@@ -311,7 +360,6 @@ class StarDataset(Dataset):
                 latent_description=latent_description
             )
         else:
-            # Use basic answer template
             answer_template = random.choice(self.basic_answer_templates)
             answer = answer_template.format(
                 Teff=stellar_params['Teff'],
@@ -319,6 +367,8 @@ class StarDataset(Dataset):
                 logg=stellar_params['logg'],
                 stellar_type=stellar_type
             )
+
+        numerical_targets = torch.tensor([stellar_params['Teff'], stellar_params['logg'], stellar_params['Lstar']])
 
         # Tokenize question and answer
         question_tokens = self.llama_tokenizer.encode(question, bos=True, eos=False)
@@ -329,7 +379,6 @@ class StarDataset(Dataset):
 
         # Create full sequence
         full_sequence = question_tokens + answer_tokens
-
         if special_token_pos is not None:
             full_special_token_pos = special_token_pos
         else:
@@ -338,6 +387,12 @@ class StarDataset(Dataset):
         # Truncate if too long
         if len(full_sequence) > self.max_sequence_length:
             full_sequence = full_sequence[:self.max_sequence_length]
+            # Adjust answer_tokens if truncated
+            remaining_answer_len = len(full_sequence) - len(question_tokens)
+            if remaining_answer_len > 0:
+                answer_tokens = answer_tokens[:remaining_answer_len]
+            else:
+                answer_tokens = []
 
         question_len = len(question_tokens)
 
@@ -345,15 +400,31 @@ class StarDataset(Dataset):
         input_sequence = full_sequence[:-1]
         target_sequence = full_sequence[1:]
 
-        # Create loss mask - only compute loss on answer tokens
+        # Create standard loss mask - only compute loss on answer tokens
         loss_mask = torch.zeros(len(target_sequence), dtype=torch.bool)
         if question_len < len(target_sequence):
             loss_mask[question_len - 1:] = True
 
+        # param_loss_mask = torch.zeros(len(target_sequence), dtype=torch.bool)
+        #
+        # if len(answer_tokens) > 0 and answer.strip():  # Make sure we have valid answer
+        #     # Identify parameter tokens in the answer
+        #     param_token_indicators = identify_stellar_parameter_tokens(
+        #         self.llama_tokenizer, answer, answer_tokens
+        #     )
+        #
+        #     # Map to target sequence positions
+        #     answer_start_in_target = question_len - 1
+        #     for i, is_param_token in enumerate(param_token_indicators):
+        #         target_pos = answer_start_in_target + i
+        #         if target_pos < len(param_loss_mask) and is_param_token:
+        #             param_loss_mask[target_pos] = True
+
         return {
             'input_ids': torch.tensor(input_sequence, dtype=torch.long),
             'target_ids': torch.tensor(target_sequence, dtype=torch.long),
-            'loss_mask': loss_mask,
+            'loss_mask': loss_mask,  # Original mask (all answer tokens)
+            'numerical_targets': numerical_targets,
             'latent_features': torch.tensor(noisy_features, dtype=torch.float32),
             'special_token_positions': torch.tensor(full_special_token_pos, dtype=torch.long),
             'question_text': question,
@@ -451,18 +522,20 @@ class StarDataset(Dataset):
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """Custom collate function to handle variable length sequences"""
+    """Modified collate function to handle parameter loss masks"""
     max_len = max(len(item['input_ids']) for item in batch)
 
     input_ids = []
     target_ids = []
     loss_masks = []
+    targets = []  # NEW
     special_token_positions = []
 
     for item in batch:
         input_seq = item['input_ids']
         target_seq = item['target_ids']
         loss_mask = item['loss_mask']
+        numerical_targets = item['numerical_targets']
 
         pad_length = max_len - len(input_seq)
 
@@ -473,18 +546,19 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         input_ids.append(padded_input)
         target_ids.append(padded_target)
         loss_masks.append(padded_loss_mask)
+        targets.append(numerical_targets)
         special_token_positions.append(item['special_token_positions'])
 
     return {
         'input_ids': torch.stack(input_ids),
         'target_ids': torch.stack(target_ids),
         'loss_mask': torch.stack(loss_masks),
+        'numerical_targets': torch.stack(targets),
         'latent_features': torch.stack([item['latent_features'] for item in batch]),
         'special_token_positions': torch.stack(special_token_positions),
         'question_texts': [item['question_text'] for item in batch],
         'answer_texts': [item['answer_text'] for item in batch]
     }
-
 
 def create_sample_data(n_samples: int = 1000, latent_dim: int = 128):
     """Create sample data for testing"""

@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,14 +9,176 @@ from pathlib import Path
 import json
 import time
 from typing import Dict, Any, List
+import re
 
 # Import our custom modules
 from llama3.llama.model_single_gpu import Transformer, ModelArgs  # Your non-parallel LLaMA
 from llama3.llama.tokenizer import Tokenizer
 from data.star_dataset import StarDataset, setup_dataloaders, create_sample_data
-from nn.llm import MultimodalLlamaModel, create_multimodal_llama, train_step, evaluate_model, MODEL_PATH, TOKENIZER_PATH
+from nn.llm import MultimodalLlamaModel, create_multimodal_llama, train_step, MODEL_PATH, TOKENIZER_PATH
 from util.utils import merge_dataframes_and_filter_array
 
+
+def extract_predicted_parameters_differentiable(logits: torch.Tensor,
+                                                param_loss_mask: torch.Tensor,
+                                                vocab_to_value_map: torch.Tensor) -> torch.Tensor:
+    """
+    Extract predicted numerical values using differentiable operations
+
+    Args:
+        logits: Model output logits [batch_size, seq_len, vocab_size]
+        param_loss_mask: Mask indicating parameter token positions [batch_size, seq_len]
+        vocab_to_value_map: Mapping from vocab indices to numerical values [vocab_size]
+
+    Returns:
+        Predicted parameters [batch_size, 3] for [Teff, logg, Lstar]
+    """
+    batch_size, seq_len, vocab_size = logits.shape
+
+    # Use softmax to get probability distribution (differentiable)
+    probs = F.softmax(logits, dim=-1)  # [batch_size, seq_len, vocab_size]
+
+    # Compute expected value using the probability distribution
+    # This is differentiable unlike argmax
+    expected_values = torch.matmul(probs, vocab_to_value_map.unsqueeze(-1)).squeeze(-1)  # [batch_size, seq_len]
+
+    # Apply parameter mask to extract only parameter positions
+    masked_values = expected_values * param_loss_mask  # Zero out non-parameter positions
+
+    # Sum over sequence length and divide by number of parameter tokens
+    # This assumes we have 3 parameters per sample
+    param_sum = masked_values.sum(dim=1)  # [batch_size]
+    param_count = param_loss_mask.sum(dim=1).clamp(min=1)  # Avoid division by zero
+
+    avg_param_value = param_sum / param_count  # [batch_size]
+
+    # For now, return the same value for all 3 parameters
+    # You can modify this to extract specific parameters if you have position info
+    predicted_params = avg_param_value.unsqueeze(1).repeat(1, 3)  # [batch_size, 3]
+
+    return predicted_params
+
+
+def create_vocab_to_value_mapping(tokenizer, device='cuda'):
+    """
+    Create a mapping from vocabulary indices to numerical values
+    This is a simplified version - you'll need to customize this based on your tokenizer
+    """
+    vocab_size = tokenizer.n_words
+    vocab_to_value = torch.zeros(vocab_size, device=device)
+
+    # Try to map number tokens to their values
+    for i in range(vocab_size):
+        try:
+            token_str = tokenizer.decode([i])
+            # Try to extract number from token
+            if token_str.isdigit():
+                vocab_to_value[i] = float(token_str)
+            elif '.' in token_str and token_str.replace('.', '').isdigit():
+                vocab_to_value[i] = float(token_str)
+            else:
+                # For non-numeric tokens, assign a default value or use position-based heuristic
+                vocab_to_value[i] = 0.0
+        except:
+            vocab_to_value[i] = 0.0
+
+    return vocab_to_value
+
+
+def extract_predicted_parameters_hybrid(tokenizer, logits: torch.Tensor,
+                                        param_loss_mask: torch.Tensor = None) -> torch.Tensor:
+    """
+    Hybrid approach: Use differentiable operations for gradient flow,
+    but also provide interpretable parameter extraction
+
+    Args:
+        tokenizer: The tokenizer
+        logits: Model output logits [batch_size, seq_len, vocab_size]
+        param_loss_mask: Mask indicating parameter token positions [batch_size, seq_len]
+
+    Returns:
+        Predicted parameters [batch_size, 3] for [Teff, logg, Lstar]
+    """
+    batch_size, seq_len, vocab_size = logits.shape
+    device = logits.device
+
+    if param_loss_mask is None:
+        # If no mask provided, use all positions (fallback)
+        param_loss_mask = torch.ones(batch_size, seq_len, device=device)
+
+    # Method 1: Differentiable approach using temperature-based sampling
+    # Use low temperature to approximate argmax but keep differentiability
+    temperature = 0.1
+    soft_predictions = F.softmax(logits / temperature, dim=-1)  # [batch_size, seq_len, vocab_size]
+
+    # Create a simple mapping from token indices to approximate numerical values
+    # This is a heuristic - you might want to improve this based on your specific tokenizer
+    token_values = torch.arange(vocab_size, device=device, dtype=torch.float32)
+
+    # Compute expected token index (differentiable)
+    expected_token_indices = torch.sum(soft_predictions * token_values, dim=-1)  # [batch_size, seq_len]
+
+    # Apply parameter mask
+    if param_loss_mask is not None:
+        masked_predictions = expected_token_indices * param_loss_mask
+        # Average over parameter positions
+        param_counts = param_loss_mask.sum(dim=1).clamp(min=1)
+        param_averages = masked_predictions.sum(dim=1) / param_counts  # [batch_size]
+    else:
+        # Fallback: average over all positions
+        param_averages = expected_token_indices.mean(dim=1)  # [batch_size]
+
+    # Scale to reasonable parameter ranges (this is a heuristic)
+    # You'll want to adjust these based on your actual parameter ranges
+    teff_pred = param_averages * 10 + 3000  # Scale to temperature range
+    logg_pred = (param_averages / vocab_size) * 5  # Scale to log(g) range
+    lstar_pred = torch.abs(param_averages / vocab_size) * 100  # Scale to luminosity range
+
+    predicted_params = torch.stack([teff_pred, logg_pred, lstar_pred], dim=1)  # [batch_size, 3]
+
+    return predicted_params
+
+
+def extract_numerical_values_from_text(text: str) -> Dict[str, float]:
+    """
+    Extract numerical values for stellar parameters from generated text
+
+    Args:
+        text: Generated text containing stellar parameters
+
+    Returns:
+        Dictionary with extracted parameter values
+    """
+    extracted = {}
+
+    # Patterns for different parameters
+    patterns = {
+        'Teff': [
+            r'(?:Teff[=\s]*|temperature[=\s]*|T[=\s]*)(\d+(?:\.\d+)?)\s*K',
+            r'(\d+(?:\.\d+)?)\s*K',  # Just number followed by K
+        ],
+        'logg': [
+            r'(?:logg[=\s]*|log\(g\)[=\s]*|gravity[=\s]*)(\d+(?:\.\d+)?)',
+            r'log\(g\)\s*[=\s]*(\d+(?:\.\d+)?)',
+        ],
+        'Lstar': [
+            r'(?:Lstar[=\s]*|L[=\s]*|luminosity[=\s]*)(\d+(?:\.\d+)?)',
+            r'(\d+(?:\.\d+)?)\s*(?:solar|L_sun|L☉)',
+        ]
+    }
+
+    for param_name, param_patterns in patterns.items():
+        for pattern in param_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    value = float(match.group(1))
+                    extracted[param_name] = value
+                    break  # Found value for this parameter
+                except ValueError:
+                    continue
+
+    return extracted
 
 class EarlyStopping:
     """Early stopping utility class"""
@@ -259,6 +422,7 @@ class StarLlamaTrainer:
         self.model = create_multimodal_llama(
             self.base_model,
             latent_dim,
+            3,
             self.tokenizer,
             self.config['special_token']
         )
@@ -399,10 +563,11 @@ class StarLlamaTrainer:
         print(f"Applying freeze strategy: {strategy}")
 
         if strategy == 'encoder_only':
-            # Freeze everything except latent encoder
+            # Freeze everything except latent encoder AND latent regressor
             for name, param in self.model.named_parameters():
-                if 'latent_encoder' in name:
+                if 'latent_encoder' in name or 'latent_regressor' in name:
                     param.requires_grad = True
+                    print(f"  ✓ Unfrozen: {name}")
                 else:
                     param.requires_grad = False
 
@@ -411,12 +576,14 @@ class StarLlamaTrainer:
             if not self.lora_modules:
                 self._apply_lora()
 
-            # Freeze base model, enable encoder and LoRA parameters
+            # Freeze base model, enable encoder, regressor, AND LoRA parameters
             for name, param in self.model.named_parameters():
-                if 'latent_encoder' in name:
+                if 'latent_encoder' in name or 'latent_regressor' in name:
                     param.requires_grad = True
+                    print(f"  ✓ Unfrozen (multimodal): {name}")
                 elif 'lora' in name:
                     param.requires_grad = True
+                    print(f"  ✓ Unfrozen (LoRA): {name}")
                 else:
                     param.requires_grad = False
 
@@ -427,14 +594,35 @@ class StarLlamaTrainer:
 
         self.current_freeze_state = strategy
 
+        # Verify critical components are trainable
+        critical_components = ['latent_encoder', 'latent_regressor']
+        for component in critical_components:
+            component_params = [p for name, p in self.model.named_parameters()
+                                if component in name and p.requires_grad]
+            if not component_params:
+                print(f"ERROR: No trainable parameters in {component}!")
+            else:
+                total_params = sum(p.numel() for p in component_params)
+                print(f"✓ {component}: {len(component_params)} layers, {total_params:,} trainable params")
+
         # Print what's trainable
         trainable_modules = set()
+        trainable_count = 0
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                module_type = 'lora' if 'lora' in name else name.split('.')[0]
-                trainable_modules.add(module_type)
+                trainable_count += param.numel()
+                if 'latent_encoder' in name:
+                    trainable_modules.add('latent_encoder')
+                elif 'latent_regressor' in name:
+                    trainable_modules.add('latent_regressor')
+                elif 'lora' in name:
+                    trainable_modules.add('lora')
+                else:
+                    module_type = name.split('.')[0]
+                    trainable_modules.add(f'base_{module_type}')
 
         print(f"Trainable module types: {list(trainable_modules)}")
+        print(f"Total trainable parameters: {trainable_count:,}")
 
     def _setup_optimizer(self):
         """Setup optimizer and learning rate scheduler"""
@@ -576,6 +764,60 @@ class StarLlamaTrainer:
         self.config['freeze_strategy'] = new_strategy
         self._setup_optimizer()
 
+    def get_loss(self, out_dict, target_ids, numerical_targets, loss_mask, param_loss_mask=None):
+        """
+        Compute loss with differentiable parameter extraction
+        """
+        logits = out_dict['logits']
+        reg_out = out_dict['reg_out']
+
+        # Cross-entropy loss
+        ce_loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            target_ids.view(-1),
+            ignore_index=-100,
+            reduction='none'
+        )
+        ce_loss = ce_loss.view(target_ids.shape)
+
+        # # Numerical parameter loss (differentiable)
+        # if param_loss_mask is not None:
+        #     numerical_params = extract_predicted_parameters_hybrid(self.tokenizer, logits, param_loss_mask)
+        # else:
+        #     numerical_params = extract_predicted_parameters_hybrid(self.tokenizer, logits)
+
+        # DEBUG: Check reg_out gradients
+        # print(f"reg_out requires_grad: {reg_out.requires_grad}")
+        # print(f"reg_out grad_fn: {reg_out.grad_fn}")
+        # print(f"numerical_targets requires_grad: {numerical_targets.requires_grad}")
+        #
+        # # Check latent_regressor parameters
+        # regressor_params = list(self.model.latent_regressor.parameters())
+        # print(f"Regressor param[0] requires_grad: {regressor_params[0].requires_grad}")
+
+        numerical_loss = F.mse_loss(reg_out.float(), numerical_targets.float(), reduction='mean')
+
+        # Apply loss masking based on focus mode
+        if self.config['loss_focus'] == 'parameters_only':
+            # param_weight = 100.0
+            # other_weight = 0.01
+            # masked_ce_loss = (ce_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+            # loss = numerical_loss * param_weight + masked_ce_loss * other_weight
+            loss = numerical_loss
+
+        elif self.config['loss_focus'] == 'weighted':
+            # Weight parameter tokens more heavily than others
+            param_weight = self.config.get('param_weight', 10.0)
+            other_weight = self.config.get('other_weight', 0.1)
+            masked_ce_loss = (ce_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+            loss = numerical_loss * param_weight + masked_ce_loss * other_weight
+
+        else:  # 'standard'
+            # Use original loss mask (all answer tokens)
+            loss = (ce_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+
+        return loss
+
     def train(self):
         """Main training loop with early stopping"""
         print("Starting training...")
@@ -601,8 +843,23 @@ class StarLlamaTrainer:
             num_batches = 0
 
             for batch_idx, batch in enumerate(self.train_loader):
+                self.optimizer.zero_grad()
+                input_ids = batch['input_ids'].to(self.device)
+                target_ids = batch['target_ids'].to(self.device)
+                loss_mask = batch['loss_mask'].to(self.device)
+                latent_features = batch['latent_features'].to(self.device)
+                special_token_positions = batch['special_token_positions'].to(self.device)
+                numerical_targets = batch['numerical_targets'].to(self.device)
+
                 # Training step
-                loss = train_step(self.model, batch, self.optimizer, self.device)
+                out_dict = train_step(self.model, batch, self.optimizer, self.device)
+                loss = self.get_loss(out_dict, target_ids, numerical_targets, loss_mask)
+
+                # Backward pass
+                loss.backward()
+
+                self.optimizer.step()
+
                 epoch_train_loss += loss
                 num_batches += 1
                 step += 1
@@ -621,7 +878,7 @@ class StarLlamaTrainer:
 
                 # Evaluation
                 if step % self.config['eval_every_n_steps'] == 0:
-                    val_loss = evaluate_model(self.model, self.val_loader, self.device)
+                    val_loss = self.evaluate_model(self.model, self.val_loader, self.device)
                     print(f"  Step {step} - Validation Loss: {val_loss:.4f}")
 
                     # Save best model
@@ -633,7 +890,7 @@ class StarLlamaTrainer:
 
             # Epoch summary and early stopping check
             avg_train_loss = epoch_train_loss / num_batches
-            val_loss = evaluate_model(self.model, self.val_loader, self.device)
+            val_loss = self.evaluate_model(self.model, self.val_loader, self.device)
 
             print(f"Epoch {epoch + 1} Summary:")
             print(f"  Average Train Loss: {avg_train_loss:.4f}")
@@ -667,6 +924,30 @@ class StarLlamaTrainer:
             print(f"\nTraining completed all {self.config['num_epochs']} epochs")
 
         print(f"Best validation loss achieved: {self.early_stopping.best_loss:.4f}")
+
+    def evaluate_model(self) -> float:
+        """Modified evaluation with parameter-focused loss"""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
+
+        with torch.no_grad():
+            for batch in self.val_loader:
+                input_ids = batch['input_ids'].to(self.device)
+                target_ids = batch['target_ids'].to(self.device)
+                loss_mask = batch['loss_mask'].to(self.device)
+                param_loss_mask = batch['param_loss_mask'].to(self.device)  # NEW
+                latent_features = batch['latent_features'].to(self.device)
+                special_token_positions = batch['special_token_positions'].to(self.device)
+                numerical_targets = batch['numerical_targets'].to(self.device)
+                with torch.no_grad():
+                    logits = self.model(input_ids, latent_features, special_token_positions, start_pos=0)
+
+                batch_loss = self.get_loss(logits, target_ids, numerical_targets, loss_mask)
+                total_loss += batch_loss.item()
+                num_batches += 1
+
+        return total_loss / num_batches if num_batches > 0 else float('inf')
 
     def _save_checkpoint(self, epoch: int, step: int, val_loss: float, is_best: bool = False):
         """Save model checkpoint"""
@@ -1079,10 +1360,11 @@ def main(num_samples=5000):
         'learning_rate': 5e-4,  # Higher LR for LoRA
         'num_epochs': 10,  # Set high, early stopping will handle it
         'max_sequence_length': 256,
-        'noise_std': 0.02,
+        'noise_std': 0.002,
         'train_split': 0.8,
         'eval_every_n_steps': 100,
         'save_every_n_epochs': 2,
+        'loss_focus': 'weighted',
 
         # Early stopping configuration
         'early_stopping_patience': 7,  # Stop after 7 epochs without improvement
@@ -1167,7 +1449,8 @@ def main(num_samples=5000):
         latent_features = first_batch['latent_features'].to(trainer.device)
         special_token_positions = first_batch['special_token_positions'].to(trainer.device)
 
-        logits = trainer.model(input_ids, latent_features, special_token_positions, start_pos=0)
+        out_dict = trainer.model(input_ids, latent_features, special_token_positions, start_pos=0)
+        logits = out_dict['logits']
         print(f"Test forward pass successful! Logits requires_grad: {logits.requires_grad}")
 
         # Print initial model status

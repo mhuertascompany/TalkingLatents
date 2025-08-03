@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
-from typing import Optional, List
+from typing import Optional, List, Tuple, Dict
 
 TOKENIZER_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B\tokenizer.model"
 MODEL_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B"
@@ -74,11 +74,17 @@ class LatentFeatureEncoder(nn.Module):
 class MultimodalLlamaModel(nn.Module):
     """LLaMA model with multimodal capabilities for latent feature integration"""
 
-    def __init__(self, base_model, latent_dim: int, special_token: str = "<STAR_DATA>"):
+    def __init__(self, base_model, latent_dim: int, out_dim: int, special_token: str = " STAR"):
         super().__init__()
         self.base_model = base_model
         self.embedding_dim = base_model.params.dim
         self.special_token = special_token
+        self.latent_regressor = nn.Sequential(
+            nn.Linear(self.embedding_dim, self.embedding_dim // 4),
+            nn.GELU(),
+            nn.LayerNorm(self.embedding_dim // 4),
+            nn.Linear(self.embedding_dim // 4, out_dim)
+        )
 
         # Latent feature encoder - projects features to embedding space
         self.latent_encoder = LatentFeatureEncoder(
@@ -99,7 +105,7 @@ class MultimodalLlamaModel(nn.Module):
                 input_ids: torch.Tensor,
                 latent_features: torch.Tensor,
                 special_token_positions: torch.Tensor,
-                start_pos: int = 0) -> torch.Tensor:
+                start_pos: int = 0) -> Dict[str, torch.Tensor]:
         """
         Forward pass with latent feature integration at embedding level
         """
@@ -112,7 +118,7 @@ class MultimodalLlamaModel(nn.Module):
             return self._forward_generation(input_ids, latent_features, special_token_positions, start_pos)
 
     def _forward_training(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
-                          special_token_positions: torch.Tensor) -> torch.Tensor:
+                          special_token_positions: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Training forward pass without caching"""
         batch_size, seq_len = input_ids.shape
 
@@ -129,10 +135,12 @@ class MultimodalLlamaModel(nn.Module):
                 token_embeddings[batch_idx, special_pos] = latent_embeddings[batch_idx]
 
         # Simple forward through base model without caching
-        return self._simple_forward(token_embeddings)
+        out, h = self._simple_forward(token_embeddings)
+        reg_out = self.latent_regressor(latent_features)
+        return {"logits": out, "h": h, "reg_out": reg_out}
 
     def _forward_generation(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
-                            special_token_positions: torch.Tensor, start_pos: int) -> torch.Tensor:
+                            special_token_positions: torch.Tensor, start_pos: int) -> Dict[str, torch.Tensor]:
         """Generation forward pass with caching (for inference)"""
         batch_size, seq_len = input_ids.shape
 
@@ -149,9 +157,11 @@ class MultimodalLlamaModel(nn.Module):
             if 0 <= special_pos < seq_len:
                 modified_embeddings[batch_idx, special_pos] = latent_embeddings[batch_idx]
 
-        return self._forward_with_embeddings(modified_embeddings, start_pos)
+        out, h = self._forward_with_embeddings(modified_embeddings, start_pos)
+        reg_out = self.latent_regressor(latent_features)
+        return {"logits": out, "h": h, "reg_out": reg_out}
 
-    def _simple_forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+    def _simple_forward(self, embeddings: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Simple forward pass for training without caching complications"""
         batch_size, seq_len, embed_dim = embeddings.shape
         device = embeddings.device
@@ -192,7 +202,7 @@ class MultimodalLlamaModel(nn.Module):
         h = self.base_model.norm(h)
         output = self.base_model.output(h).float()
 
-        return output
+        return output, h
 
     def _simple_attention(self, x: torch.Tensor, freqs_cis: torch.Tensor,
                           mask: Optional[torch.Tensor], attention_layer) -> torch.Tensor:
@@ -234,7 +244,7 @@ class MultimodalLlamaModel(nn.Module):
 
         return attention_layer.wo(output)
 
-    def _forward_with_embeddings(self, embeddings: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+    def _forward_with_embeddings(self, embeddings: torch.Tensor, start_pos: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the transformer with custom embeddings
         """
@@ -270,7 +280,7 @@ class MultimodalLlamaModel(nn.Module):
         h = self.base_model.norm(h)
         output = self.base_model.output(h).float()
 
-        return output
+        return output, h
 
     def generate_response(self,
                           question_tokens: List[int],
@@ -423,13 +433,14 @@ class MultimodalLlamaModel(nn.Module):
         return next_token
 
 
-def create_multimodal_llama(base_model, latent_dim: int, tokenizer, special_token: str = "<STAR_DATA>"):
+def create_multimodal_llama(base_model, latent_dim: int, out_dim: int,  tokenizer, special_token: str = " STAR"):
     """
     Create a multimodal LLaMA model
 
     Args:
         base_model: The base LLaMA transformer model
         latent_dim: Dimension of latent features
+        out_dim: Dimension of output features for numerical regression tasks
         tokenizer: The tokenizer (to get special token ID)
         special_token: Special token string
 
@@ -437,7 +448,7 @@ def create_multimodal_llama(base_model, latent_dim: int, tokenizer, special_toke
         MultimodalLlamaModel instance
     """
     # Create multimodal model
-    model = MultimodalLlamaModel(base_model, latent_dim, special_token)
+    model = MultimodalLlamaModel(base_model, latent_dim, out_dim, special_token)
 
     # Ensure special token is in tokenizer vocabulary
     if special_token not in tokenizer.special_tokens:
@@ -483,25 +494,26 @@ def create_multimodal_llama(base_model, latent_dim: int, tokenizer, special_toke
     return model
 
 
-def train_step(model: MultimodalLlamaModel,
+def train_step(model: 'MultimodalLlamaModel',
                batch: dict,
                optimizer: torch.optim.Optimizer,
-               device: str = 'cuda') -> float:
+               device: str = 'cuda',
+               ) -> Dict[str, torch.Tensor]:
     """
-    Single training step with proper gradient checks
+    Modified training step with stellar parameter focused loss
 
     Args:
         model: The multimodal model
         batch: Batch from dataloader
         optimizer: Optimizer
         device: Device to run on
+        loss_focus: 'parameters_only', 'weighted', or 'standard'
+        param_weight: Weight for parameter tokens (when loss_focus='weighted')
+        other_weight: Weight for non-parameter tokens (when loss_focus='weighted')
 
     Returns:
         Loss value
     """
-    model.train()
-    optimizer.zero_grad()
-
     # Move batch to device
     input_ids = batch['input_ids'].to(device)
     target_ids = batch['target_ids'].to(device)
@@ -513,90 +525,13 @@ def train_step(model: MultimodalLlamaModel,
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
         print("Warning: No trainable parameters found!")
-        return 0.0
+        return {'logits':torch.zeros(0, device=device)}
 
     # Forward pass
-    logits = model(input_ids, latent_features, special_token_positions, start_pos=0)
+    out = model(input_ids, latent_features, special_token_positions, start_pos=0)
 
-    # Calculate loss only on answer tokens
-    loss = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        target_ids.view(-1),
-        ignore_index=-100,
-        reduction='none'
-    )
+    return out
 
-    # Apply loss mask to only compute loss on answer parts
-    loss = loss.view(target_ids.shape)  # Reshape back to (batch_size, seq_len)
-    masked_loss = loss * loss_mask.float()
-
-    # Check if we have valid tokens to compute loss on
-    valid_tokens = loss_mask.sum()
-    if valid_tokens == 0:
-        print("Warning: No valid tokens for loss computation!")
-        return 0.0
-
-    # Average loss over valid tokens
-    total_loss = masked_loss.sum() / valid_tokens
-
-    # Check if loss requires gradients
-    if not total_loss.requires_grad:
-        print(f"Warning: Loss doesn't require gradients! Loss value: {total_loss.item()}")
-        print(f"Loss tensor grad_fn: {total_loss.grad_fn}")
-        print("Checking model parameters...")
-
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                print(f"  Trainable: {name} - shape: {param.shape}")
-
-        return total_loss.item()
-
-    # Backward pass
-    total_loss.backward()
-
-    # Check if gradients were actually computed
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    if grad_norm == 0:
-        print("Warning: Gradient norm is 0!")
-
-    optimizer.step()
-
-    return total_loss.item()
-
-
-def evaluate_model(model: MultimodalLlamaModel,
-                   val_loader,
-                   device: str = 'cuda') -> float:
-    """Evaluate the model on validation set"""
-    model.eval()
-    total_loss = 0
-    num_batches = 0
-
-    with torch.no_grad():
-        for batch in val_loader:
-            input_ids = batch['input_ids'].to(device)
-            target_ids = batch['target_ids'].to(device)
-            loss_mask = batch['loss_mask'].to(device)
-            latent_features = batch['latent_features'].to(device)
-            special_token_positions = batch['special_token_positions'].to(device)
-
-            logits = model(input_ids, latent_features, special_token_positions, start_pos=0)
-
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target_ids.view(-1),
-                ignore_index=-100,
-                reduction='none'
-            )
-
-            loss = loss.view(target_ids.shape)
-            masked_loss = loss * loss_mask.float()
-            batch_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
-
-            total_loss += batch_loss.item()
-            num_batches += 1
-
-    return total_loss / num_batches if num_batches > 0 else float('inf')
 
 
 # Example usage
