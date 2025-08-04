@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 from dataclasses import dataclass
 import torch.nn as nn
 import re
+import time
 
 
 def identify_stellar_parameter_tokens(tokenizer, answer_text: str, answer_tokens: List[int]) -> List[bool]:
@@ -227,6 +228,27 @@ class StarDataset(Dataset):
             "This {stellar_type} star (T={Teff:.0f}K, log(g)={logg:.2f}, L={Lstar:.2f}) shows {latent_description} in its encoded representation.",
         ]
 
+        self.param_stats = {
+            'Teff': {'mean': self.metadata_df['Teff'].mean(), 'std': self.metadata_df['Teff'].std()},
+            'logg': {'mean': self.metadata_df['logg'].mean(), 'std': self.metadata_df['logg'].std()},
+            'Lstar': {'mean': np.exp(self.metadata_df['Lstar']).mean(), 'std': np.exp(self.metadata_df['Lstar']).std()}
+        }
+        print(f"Parameter normalization stats: {self.param_stats}")
+
+    def normalize_params(self, teff, logg, lstar):
+        """Normalize stellar parameters to zero mean, unit variance"""
+        norm_teff = (teff - self.param_stats['Teff']['mean']) / self.param_stats['Teff']['std']
+        norm_logg = (logg - self.param_stats['logg']['mean']) / self.param_stats['logg']['std']
+        norm_lstar = (lstar - self.param_stats['Lstar']['mean']) / self.param_stats['Lstar']['std']
+        return norm_teff, norm_logg, norm_lstar
+
+    def denormalize_params(self, norm_teff, norm_logg, norm_lstar):
+        """Denormalize parameters back to original scale"""
+        teff = norm_teff * self.param_stats['Teff']['std'] + self.param_stats['Teff']['mean']
+        logg = norm_logg * self.param_stats['logg']['std'] + self.param_stats['logg']['mean']
+        lstar = norm_lstar * self.param_stats['Lstar']['std'] + self.param_stats['Lstar']['mean']
+        return teff, logg, lstar
+
     def __len__(self) -> int:
         return len(self.latent_features)
 
@@ -325,6 +347,7 @@ class StarDataset(Dataset):
         return None
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+
         # Get data for this sample
         latent_vector = self.latent_features[idx]
         metadata = self.metadata_df.iloc[idx]
@@ -368,7 +391,12 @@ class StarDataset(Dataset):
                 stellar_type=stellar_type
             )
 
-        numerical_targets = torch.tensor([stellar_params['Teff'], stellar_params['logg'], stellar_params['Lstar']])
+        norm_teff, norm_logg, norm_lstar = self.normalize_params(
+            stellar_params['Teff'],
+            stellar_params['logg'],
+            stellar_params['Lstar']
+        )
+        numerical_targets = torch.tensor([norm_teff, norm_logg, norm_lstar])
 
         # Tokenize question and answer
         question_tokens = self.llama_tokenizer.encode(question, bos=True, eos=False)
@@ -593,7 +621,8 @@ def setup_dataloaders(
         stratify_column: Optional[str] = None,
         num_workers: int = 0,
         pin_memory: Optional[bool] = None,
-        include_latent_analysis: bool = True
+        include_latent_analysis: bool = True,
+        test: bool = False
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Setup train, validation, and test dataloaders with proper random splitting.
@@ -714,6 +743,9 @@ def setup_dataloaders(
         include_latent_analysis=include_latent_analysis
     )
 
+    if test:
+        test_dataset_samples(train_dataset, 100)
+
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
@@ -745,7 +777,20 @@ def setup_dataloaders(
         drop_last=False  # Keep all test samples
     )
 
+    if test:
+        for i in range(10):
+            start = time.time()
+            data = next(iter(test_loader))
+            print("dataloader time: ", time.time() - start)
+
+
     return train_loader, val_loader, test_loader
+
+
+def test_dataset_samples(dataset, num_samples):
+    for i in range(num_samples):
+        data = dataset[i]
+        print(data['numerical_targets'])
 
 
 if __name__ == "__main__":

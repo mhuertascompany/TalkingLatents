@@ -80,10 +80,13 @@ class MultimodalLlamaModel(nn.Module):
         self.embedding_dim = base_model.params.dim
         self.special_token = special_token
         self.latent_regressor = nn.Sequential(
-            nn.Linear(self.embedding_dim, self.embedding_dim // 4),
-            nn.GELU(),
-            nn.LayerNorm(self.embedding_dim // 4),
-            nn.Linear(self.embedding_dim // 4, out_dim)
+            nn.Linear(latent_dim, latent_dim // 4),
+            nn.ReLU(),  # More stable than GELU
+            nn.Dropout(0.1),
+            nn.Linear(latent_dim // 4, latent_dim // 8),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(latent_dim // 8, out_dim)
         )
 
         # Latent feature encoder - projects features to embedding space
@@ -136,7 +139,7 @@ class MultimodalLlamaModel(nn.Module):
 
         # Simple forward through base model without caching
         out, h = self._simple_forward(token_embeddings)
-        reg_out = self.latent_regressor(latent_features)
+        reg_out = self.latent_regressor(latent_features).nan_to_num(0)
         return {"logits": out, "h": h, "reg_out": reg_out}
 
     def _forward_generation(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
@@ -516,16 +519,16 @@ def train_step(model: 'MultimodalLlamaModel',
     """
     # Move batch to device
     input_ids = batch['input_ids'].to(device)
-    target_ids = batch['target_ids'].to(device)
-    loss_mask = batch['loss_mask'].to(device)
+    # target_ids = batch['target_ids'].to(device)
+    # loss_mask = batch['loss_mask'].to(device)
     latent_features = batch['latent_features'].to(device)
     special_token_positions = batch['special_token_positions'].to(device)
 
     # Check if model has trainable parameters
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    if not trainable_params:
-        print("Warning: No trainable parameters found!")
-        return {'logits':torch.zeros(0, device=device)}
+    # trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # if not trainable_params:
+    #     print("Warning: No trainable parameters found!")
+    #     return {'logits':torch.zeros(0, device=device)}
 
     # Forward pass
     out = model(input_ids, latent_features, special_token_positions, start_pos=0)

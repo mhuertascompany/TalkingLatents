@@ -452,7 +452,8 @@ class StarLlamaTrainer:
             self.tokenizer,
             self.config['special_token'],
             batch_size=self.config['batch_size'],
-            noise_std=self.config['noise_std']
+            noise_std=self.config['noise_std'],
+            test=True
         )
 
         # Setup optimizer and scheduler
@@ -780,21 +781,6 @@ class StarLlamaTrainer:
         )
         ce_loss = ce_loss.view(target_ids.shape)
 
-        # # Numerical parameter loss (differentiable)
-        # if param_loss_mask is not None:
-        #     numerical_params = extract_predicted_parameters_hybrid(self.tokenizer, logits, param_loss_mask)
-        # else:
-        #     numerical_params = extract_predicted_parameters_hybrid(self.tokenizer, logits)
-
-        # DEBUG: Check reg_out gradients
-        # print(f"reg_out requires_grad: {reg_out.requires_grad}")
-        # print(f"reg_out grad_fn: {reg_out.grad_fn}")
-        # print(f"numerical_targets requires_grad: {numerical_targets.requires_grad}")
-        #
-        # # Check latent_regressor parameters
-        # regressor_params = list(self.model.latent_regressor.parameters())
-        # print(f"Regressor param[0] requires_grad: {regressor_params[0].requires_grad}")
-
         numerical_loss = F.mse_loss(reg_out.float(), numerical_targets.float(), reduction='mean')
 
         # Apply loss masking based on focus mode
@@ -878,7 +864,7 @@ class StarLlamaTrainer:
 
                 # Evaluation
                 if step % self.config['eval_every_n_steps'] == 0:
-                    val_loss = self.evaluate_model(self.model, self.val_loader, self.device)
+                    val_loss = self.evaluate_model()
                     print(f"  Step {step} - Validation Loss: {val_loss:.4f}")
 
                     # Save best model
@@ -890,7 +876,7 @@ class StarLlamaTrainer:
 
             # Epoch summary and early stopping check
             avg_train_loss = epoch_train_loss / num_batches
-            val_loss = self.evaluate_model(self.model, self.val_loader, self.device)
+            val_loss = self.evaluate_model()
 
             print(f"Epoch {epoch + 1} Summary:")
             print(f"  Average Train Loss: {avg_train_loss:.4f}")
@@ -936,7 +922,6 @@ class StarLlamaTrainer:
                 input_ids = batch['input_ids'].to(self.device)
                 target_ids = batch['target_ids'].to(self.device)
                 loss_mask = batch['loss_mask'].to(self.device)
-                param_loss_mask = batch['param_loss_mask'].to(self.device)  # NEW
                 latent_features = batch['latent_features'].to(self.device)
                 special_token_positions = batch['special_token_positions'].to(self.device)
                 numerical_targets = batch['numerical_targets'].to(self.device)
@@ -1364,7 +1349,7 @@ def main(num_samples=5000):
         'train_split': 0.8,
         'eval_every_n_steps': 100,
         'save_every_n_epochs': 2,
-        'loss_focus': 'weighted',
+        'loss_focus': 'parameters_only',
 
         # Early stopping configuration
         'early_stopping_patience': 7,  # Stop after 7 epochs without improvement
