@@ -1365,7 +1365,7 @@ def main(num_samples=5000):
         'max_sequence_length': 256,
         'noise_std': 0.002,
         'train_split': 0.8,
-        'eval_every_n_steps': 100,
+        'eval_every_n_steps': 10,
         'save_every_n_epochs': 2,
         'loss_focus': 'standard',
 
