@@ -4,8 +4,8 @@ import math
 import torch.nn.functional as F
 from typing import Optional, List, Tuple, Dict
 
-TOKENIZER_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B\tokenizer.model"
-MODEL_PATH = r"C:\Users\Ilay\.llama\checkpoints\Llama3.2-1B"
+TOKENIZER_PATH = "/data/.llama/checkpoints/Llama3.2-1B/tokenizer.model"
+MODEL_PATH = "/data/.llama/checkpoints/Llama3.2-1B"
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """Precompute the frequency tensor for complex exponentials (cis) with given dimensions."""
@@ -161,7 +161,7 @@ class MultimodalLlamaModel(nn.Module):
                 modified_embeddings[batch_idx, special_pos] = latent_embeddings[batch_idx]
 
         out, h = self._forward_with_embeddings(modified_embeddings, start_pos)
-        reg_out = self.latent_regressor(latent_features)
+        reg_out = self.latent_regressor(latent_features).nan_to_num(0)
         return {"logits": out, "h": h, "reg_out": reg_out}
 
     def _simple_forward(self, embeddings: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -329,12 +329,14 @@ class MultimodalLlamaModel(nn.Module):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 # Forward pass
-                logits = self.forward(
+                out = self.forward(
                     current_tokens,
                     latent_batch,
                     special_pos_batch,
                     start_pos=0
                 )
+                
+                logits = out['logits']
 
                 # Get next token probabilities
                 next_token_logits = logits[0, -1, :]  # Last token of first batch
@@ -436,7 +438,7 @@ class MultimodalLlamaModel(nn.Module):
         return next_token
 
 
-def create_multimodal_llama(base_model, latent_dim: int, out_dim: int,  tokenizer, special_token: str = " STAR"):
+def create_multimodal_llama(base_model, latent_dim: int, out_dim: int,  tokenizer, special_token: str = "STAR"):
     """
     Create a multimodal LLaMA model
 
@@ -454,45 +456,45 @@ def create_multimodal_llama(base_model, latent_dim: int, out_dim: int,  tokenize
     model = MultimodalLlamaModel(base_model, latent_dim, out_dim, special_token)
 
     # Ensure special token is in tokenizer vocabulary
-    if special_token not in tokenizer.special_tokens:
-        # Add special token to tokenizer
-        new_token_id = max(tokenizer.special_tokens.values()) + 1
-        tokenizer.special_tokens[special_token] = new_token_id
-        print(f"Added special token '{special_token}' with ID: {new_token_id}")
+    # if special_token not in tokenizer.special_tokens:
+    #     # Add special token to tokenizer
+    #     new_token_id = max(tokenizer.special_tokens.values()) + 1
+    #     tokenizer.special_tokens[special_token] = new_token_id
+    #     print(f"Added special token '{special_token}' with ID: {new_token_id}")
 
-        # Extend model vocabulary if needed
-        current_vocab_size = base_model.params.vocab_size
-        if new_token_id >= current_vocab_size:
-            # Need to extend embeddings and output layer
-            new_vocab_size = new_token_id + 100  # Add some buffer
+    #     # Extend model vocabulary if needed
+    #     current_vocab_size = base_model.params.vocab_size
+    #     if new_token_id >= current_vocab_size:
+    #         # Need to extend embeddings and output layer
+    #         new_vocab_size = new_token_id + 100  # Add some buffer
 
-            # Extend token embeddings
-            old_embeddings = base_model.tok_embeddings
-            new_embeddings = nn.Embedding(new_vocab_size, base_model.params.dim)
+    #         # Extend token embeddings
+    #         old_embeddings = base_model.tok_embeddings
+    #         new_embeddings = nn.Embedding(new_vocab_size, base_model.params.dim)
 
-            with torch.no_grad():
-                new_embeddings.weight[:current_vocab_size] = old_embeddings.weight
-                # Initialize new tokens randomly
-                nn.init.normal_(new_embeddings.weight[current_vocab_size:], std=0.02)
+    #         with torch.no_grad():
+    #             new_embeddings.weight[:current_vocab_size] = old_embeddings.weight
+    #             # Initialize new tokens randomly
+    #             nn.init.normal_(new_embeddings.weight[current_vocab_size:], std=0.02)
 
-            base_model.tok_embeddings = new_embeddings
+    #         base_model.tok_embeddings = new_embeddings
 
-            # Extend output layer
-            old_output = base_model.output
-            new_output = nn.Linear(base_model.params.dim, new_vocab_size, bias=False)
+    #         # Extend output layer
+    #         old_output = base_model.output
+    #         new_output = nn.Linear(base_model.params.dim, new_vocab_size, bias=False)
 
-            with torch.no_grad():
-                new_output.weight[:current_vocab_size] = old_output.weight
-                # Initialize new tokens randomly
-                nn.init.normal_(new_output.weight[current_vocab_size:], std=0.02)
+    #         with torch.no_grad():
+    #             new_output.weight[:current_vocab_size] = old_output.weight
+    #             # Initialize new tokens randomly
+    #             nn.init.normal_(new_output.weight[current_vocab_size:], std=0.02)
 
-            base_model.output = new_output
-            base_model.params.vocab_size = new_vocab_size
+    #         base_model.output = new_output
+    #         base_model.params.vocab_size = new_vocab_size
 
-            print(f"Extended vocabulary from {current_vocab_size} to {new_vocab_size}")
+    #         print(f"Extended vocabulary from {current_vocab_size} to {new_vocab_size}")
 
     # Set special token ID
-    model.set_special_token_id(tokenizer.special_tokens[special_token])
+    # model.set_special_token_id(tokenizer.special_tokens[special_token])
 
     return model
 

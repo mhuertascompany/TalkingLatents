@@ -262,6 +262,9 @@ class StarDataset(Dataset):
     def _find_special_token_position(self, tokens: List[int]) -> Optional[int]:
         """Find the position of the special token in the token sequence"""
 
+        # print(tokens)
+        # return len(tokens)
+
         # Method 1: Look for the exact special token ID
         if hasattr(self.llama_tokenizer, 'get_custom_token_id'):
             try:
@@ -621,7 +624,7 @@ def setup_dataloaders(
         stratify_column: Optional[str] = None,
         num_workers: int = 0,
         pin_memory: Optional[bool] = None,
-        include_latent_analysis: bool = True,
+        include_latent_analysis: bool = False,
         test: bool = False
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """

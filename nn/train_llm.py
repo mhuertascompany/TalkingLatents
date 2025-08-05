@@ -8,8 +8,17 @@ import pandas as pd
 from pathlib import Path
 import json
 import time
+import os
 from typing import Dict, Any, List
 import re
+
+import sys
+from os import path
+ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
+print("running from ", ROOT_DIR) 
+
+os.system('pip install tiktoken fairscale fire blobfile')
 
 # Import our custom modules
 from llama3.llama.model_single_gpu import Transformer, ModelArgs  # Your non-parallel LLaMA
@@ -424,7 +433,7 @@ class StarLlamaTrainer:
             latent_dim,
             3,
             self.tokenizer,
-            self.config['special_token']
+            
         )
 
         if self.multimodal_checkpoints is not None:
@@ -781,14 +790,15 @@ class StarLlamaTrainer:
         )
         ce_loss = ce_loss.view(target_ids.shape)
 
-        numerical_loss = F.mse_loss(reg_out.float(), numerical_targets.float(), reduction='mean')
+        numerical_loss = F.mse_loss(reg_out.float(), numerical_targets.float(), reduction='none')
+        numerical_loss = numerical_loss.nan_to_num(0).mean()
+
+        if torch.any(reg_out.isnan()):
+            print("nans in reg out: ", torch.isnan(reg_out).sum())
 
         # Apply loss masking based on focus mode
         if self.config['loss_focus'] == 'parameters_only':
-            # param_weight = 100.0
-            # other_weight = 0.01
-            # masked_ce_loss = (ce_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
-            # loss = numerical_loss * param_weight + masked_ce_loss * other_weight
+            
             loss = numerical_loss
 
         elif self.config['loss_focus'] == 'weighted':
@@ -965,10 +975,10 @@ class StarLlamaTrainer:
         try:
             # Get a random sample from validation set
             sample_idx = np.random.randint(0, len(self.val_loader.dataset))
-            sample = self.val_loader.dataset[sample_idx]
+            sample = self.test_loader.dataset[sample_idx]
 
             # Create a question
-            question = f"Describe the physical parameters of this star {self.config['special_token']}"
+            question = sample['question_text']
             question_tokens = self.tokenizer.encode(question, bos=True, eos=False)
 
             # Generate response
@@ -976,6 +986,7 @@ class StarLlamaTrainer:
                 question_tokens,
                 sample['latent_features'],
                 self.tokenizer,
+                sample['special_token_positions'],
                 max_new_tokens=50,
                 temperature=0.7,
                 device=self.device
@@ -1047,6 +1058,7 @@ class StarLlamaTrainer:
                     question_tokens,
                     latent_features,
                     self.tokenizer,
+                    sample['special_token_positions'],
                     max_new_tokens=60,
                     temperature=0.5,
                     device=self.device
@@ -1088,6 +1100,7 @@ class StarLlamaTrainer:
                     q_tokens,
                     sample['latent'],
                     self.tokenizer,
+                    sample['special_token_positions'],
                     max_new_tokens=50,
                     temperature=0.4,
                     device=self.device
@@ -1119,6 +1132,7 @@ class StarLlamaTrainer:
                 comp_tokens,
                 sample_a['latent'],  # Using first sample's latent
                 self.tokenizer,
+                sample['special_token_positions'],
                 max_new_tokens=70,
                 temperature=0.4,
                 device=self.device
@@ -1150,6 +1164,7 @@ class StarLlamaTrainer:
                     q_tokens,
                     sample['latent'],
                     self.tokenizer,
+                    sample['special_token_positions'],
                     max_new_tokens=60,
                     temperature=0.4,
                     device=self.device
@@ -1177,6 +1192,7 @@ class StarLlamaTrainer:
                 stats_tokens,
                 sample['latent'],
                 self.tokenizer,
+                sample['special_token_positions'],
                 max_new_tokens=50,
                 temperature=0.4,
                 device=self.device
@@ -1202,6 +1218,7 @@ class StarLlamaTrainer:
                     q_tokens,
                     sample['latent'],
                     self.tokenizer,
+                    sample['special_token_positions'],
                     max_new_tokens=40,
                     temperature=temp,
                     device=self.device
@@ -1276,6 +1293,7 @@ class StarLlamaTrainer:
                         followup_tokens,
                         sample['latent_features'],
                         self.tokenizer,
+                        sample['special_token_positions'],
                         max_new_tokens=60,
                         temperature=0.5,
                         device=self.device
@@ -1340,7 +1358,7 @@ def main(num_samples=5000):
 
     # Configuration for progressive training with LoRA and early stopping
     config = {
-        'special_token': ' STAR',
+        'special_token': 'STAR',
         'batch_size': 4,
         'learning_rate': 5e-4,  # Higher LR for LoRA
         'num_epochs': 10,  # Set high, early stopping will handle it
@@ -1349,16 +1367,16 @@ def main(num_samples=5000):
         'train_split': 0.8,
         'eval_every_n_steps': 100,
         'save_every_n_epochs': 2,
-        'loss_focus': 'parameters_only',
+        'loss_focus': 'standard',
 
         # Early stopping configuration
-        'early_stopping_patience': 7,  # Stop after 7 epochs without improvement
-        'early_stopping_min_delta': 0.001,  # Minimum improvement of 0.001
+        'early_stopping_patience': 2, 
+        'early_stopping_min_delta': 0.0001, 
         'restore_best_weights': True,  # Restore best model when stopping
 
         # Progressive training: start with encoder only, then LoRA
-        'freeze_strategy': 'lora',
-        'encoder_only_epochs': 3,  # Switch to LoRA after 3 epochs
+        'freeze_strategy': 'encoder_only',
+        'encoder_only_epochs': 10,  # Switch to LoRA after 3 epochs
         'encoder_lr_multiplier': 1.0,
         'lora_lr_multiplier': 1.0,
 
@@ -1382,15 +1400,15 @@ def main(num_samples=5000):
     # Paths (update these to your actual paths)
     model_checkpoint_path = MODEL_PATH
     tokenizer_path = TOKENIZER_PATH
-    multimmodal_checkpoints = 'checkpoints/best_model_lora_5000_samples.pt'
+    multimmodal_checkpoints = ''
 
     # Create sample data for testing
     print("Creating sample data...")
-    latent_features = np.load('logs/2025-07-29/features.npy')
-    metadata_df = pd.read_csv('logs/2025-07-29/info.csv')
+    latent_features = np.load('/data/TalkingLatents/logs/2025-07-29/features.npy')
+    metadata_df = pd.read_csv('/data/TalkingLatents/logs/2025-07-29/info.csv')
     metadata_df = metadata_df.loc[:, ~metadata_df.columns.str.contains('^Unnamed')]
 
-    berger_lamost = pd.read_csv('tables/lamost_dr8_with_berger_labels.csv')
+    berger_lamost = pd.read_csv('/data/TalkingLatents/tables/lamost_dr8_with_berger_labels.csv')
     berger_lamost = berger_lamost.loc[:, ~berger_lamost.columns.str.contains('^Unnamed')]
 
     metadata_df, latent_features = merge_dataframes_and_filter_array(
@@ -1446,9 +1464,6 @@ def main(num_samples=5000):
 
         # Standard evaluation
         trainer.evaluate_on_samples(num_samples=5, include_followup=True)
-
-        # Comprehensive latent interpretability analysis
-        trainer.evaluate_latent_interpretability(num_samples=4)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
