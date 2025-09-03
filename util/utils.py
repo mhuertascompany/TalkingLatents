@@ -59,8 +59,19 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
     print("number of keys in state dict and model: ", len(state_dict), len(model.state_dict()))
     print("number of missing keys: ", len(missing))
     print("number of unexpected keys: ", len(unexpected))
-    print("missing keys: ", missing)
-    print("unexpected keys: ", unexpected)
+    print("missing keys: ", missing[:10] if len(missing) > 10 else missing)
+    print("unexpected keys: ", unexpected[:10] if len(unexpected) > 10 else unexpected)
+    
+    # Critical validation for physics components
+    physics_components = ['feature_encoder', 'evolution_model', 'feature_decoder']
+    for component in physics_components:
+        component_keys = [k for k in model.state_dict().keys() if component in k]
+        loaded_keys = [k for k in state_dict.keys() if component in k]
+        if component_keys and not loaded_keys:
+            print(f"WARNING: {component} exists in model but no weights loaded!")
+        elif component_keys and loaded_keys:
+            print(f"✓ {component}: {len(loaded_keys)}/{len(component_keys)} parameters loaded")
+    
     return model
 
 def merge_dataframes_and_filter_array(df1, df2, right_on, left_on,  array):

@@ -20,6 +20,7 @@ class ModelArgs:
     rope_theta: float = 500000
     max_batch_size: int = 32
     max_seq_len: int = 2048
+    use_scaled_rope: bool = True
 
 
 class RMSNorm(torch.nn.Module):

@@ -1245,9 +1245,10 @@ class StarLlamaTrainer:
 
         self.model.eval()
         questions = [
-            f"Describe the physical parameters of this star {self.config['special_token']}",
-            f"What are the characteristics of this stellar object {self.config['special_token']}?",
-            f"What type of star is this {self.config['special_token']}?",
+            f"Who was Albert Einstein?"
+            # f"Describe the physical parameters of this star {self.config['special_token']}",
+            # f"What are the characteristics of this stellar object {self.config['special_token']}?",
+            # f"What type of star is this {self.config['special_token']}?",
         ]
 
         # Conservative follow-up questions focused on reasoning rather than specific features
@@ -1460,10 +1461,10 @@ def main(num_samples=5000):
         trainer.print_model_status()
 
         # Train with automatic freeze strategy transitions and early stopping
-        trainer.train()
+        # trainer.train()
 
         # Standard evaluation
-        trainer.evaluate_on_samples(num_samples=5, include_followup=True)
+        trainer.evaluate_on_samples(num_samples=5, include_followup=False)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")

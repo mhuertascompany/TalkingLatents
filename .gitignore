@@ -9,6 +9,9 @@ google_api.txt
 # Specific files
 data/dataset_noiseless.tar.gz
 data/dataset_noiseless/
+data/dataset/
+cache/
+figs/
 
 # File extensions
 *.pth

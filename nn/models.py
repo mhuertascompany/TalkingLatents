@@ -53,7 +53,7 @@ class MultiTaskRegressor(nn.Module):
     def forward(self, x, y=None):
         x_enc, x = self.encoder(x)
         x = x.permute(0 ,2 ,1)
-        output_reg = self.regressor(x_enc)
+        output_reg = self.regressor(x_enc.sum(dim=1))
         output_dec = self.decoder(x)
         return output_reg, output_dec, x_enc
 
@@ -77,8 +77,6 @@ class MultiEncoder(nn.Module):
             x_enc = backbone_out
         RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
         x_enc = self.encoder(x_enc, RoPE)
-        if (len(x_enc.shape) == 3):
-            x_enc = x_enc.sum(dim=1)
         return x_enc, backbone_out
 
 class ConvBlock(nn.Module):
