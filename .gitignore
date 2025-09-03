@@ -13,6 +13,7 @@ data/dataset/
 cache/
 figs/
 checkpoints/
+tables/
 
 # File extensions
 *.pth
