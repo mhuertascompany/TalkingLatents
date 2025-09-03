@@ -12,6 +12,7 @@ data/dataset_noiseless/
 data/dataset/
 cache/
 figs/
+checkpoints/
 
 # File extensions
 *.pth
