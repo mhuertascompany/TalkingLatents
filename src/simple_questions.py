@@ -24,7 +24,7 @@ print("running from ", ROOT_DIR)
 
 from nn.llm import MultimodalLlamaModel
 from nn.models import MultiTaskRegressor
-from llama3.llama.model_single_gpu import Transformer, ModelArgs
+from llama3.llama.model import Transformer, ModelArgs
 from data.dataset_interpert import StellarQuestionsDataset, create_stellar_dataloaders, collate_fn
 from data.transforms import *
 from nn.train import LLMTrainer
@@ -44,8 +44,11 @@ print("number of gpus: ", torch.cuda.device_count())
 
 def setup():
     """
-    Setup the distributed training environment.
+    Setup the distributed training environment with fairscale model parallel.
     """
+    import torch.distributed as dist
+    import fairscale.nn.model_parallel.initialize as fs_init
+    
     world_size    = int(os.environ["WORLD_SIZE"])
     rank          = int(os.environ["SLURM_PROCID"])
     jobid         = int(os.environ["SLURM_JOBID"])
@@ -61,8 +64,13 @@ def setup():
     if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
     local_rank = rank - gpus_per_node * (rank // gpus_per_node)
     torch.cuda.set_device(local_rank)
-    print("device set!!")
     print(f"rank: {rank}, local_rank: {local_rank}")
+    
+    # Initialize fairscale model parallel for LLaMA
+    if not fs_init.model_parallel_is_initialized():
+        fs_init.initialize_model_parallel(1)  # 1 = use 1 GPU for model parallel
+        if rank == 0: print("Fairscale model parallel initialized", flush=True)
+    
     return local_rank, world_size, gpus_per_node
 
 def _load_llm_model_with_error_handling(args) -> Transformer:
@@ -694,7 +702,7 @@ def main():
     
     # Setup distributed training
     local_rank, world_size, gpus_per_node = setup()
-    device = torch.cuda.current_device()
+    # device = torch.cuda.current_device()
     
     print(f"Distributed training setup complete. Local rank: {local_rank}, World size: {world_size}")
     
@@ -706,16 +714,18 @@ def main():
     
     # Create datasets and dataloaders
     print("Creating datasets and dataloaders...")
-    train_loader, val_loader, test_loader = create_datasets_and_loaders(args, device)
+    train_loader, val_loader, test_loader = create_datasets_and_loaders(args, local_rank)
 
     tokenizer = train_loader.dataset.tokenizer
     
     # Create model
     print("Creating multimodal model...")
     # model = create_model(args, device)
-    model = create_model_memory_optimized(args, device)
+    model = create_model_memory_optimized(args, local_rank)
     # model = create_model_dataparallel(args, device)
     # model = create_model_dataparallel_with_memory_tracking(args, device)
+
+    print(f"Model vocab_size: {model.base_model.params.vocab_size}")
 
     # Create optimizer and scheduler
     print("Creating optimizer and scheduler...")
@@ -726,7 +736,7 @@ def main():
     
     # Create trainer
     print("Creating trainer...")
-    trainer = create_trainer(model, optimizer, criterion, train_loader, val_loader, scaler, device, args)
+    trainer = create_trainer(model, optimizer, criterion, train_loader, val_loader, scaler, local_rank, args)
     trainer.scheduler = scheduler  # Assign scheduler after trainer creation
     trainer.tokenizer = tokenizer  # Assign tokenizer for logging
     
@@ -750,11 +760,11 @@ def main():
     
     # Train the model
     if args.train:
-        trainer.evaluate_validation_samples(device, 0)
+        trainer.evaluate_validation_samples(local_rank, 0)
         print("Starting training...")
         results = trainer.fit(
             num_epochs=args.num_epochs,
-            device=device,
+            device=local_rank,
             early_stopping=args.early_stopping,
             best='loss'  # Use loss for early stopping
         )
@@ -762,7 +772,7 @@ def main():
     # Run final evaluation on test set
     if local_rank == 0:
         print("Running final evaluation on test set...")
-        test_results = trainer.predict(test_loader, device, load_best=True, compute_embeddings=True)
+        test_results = trainer.predict(test_loader, local_rank, load_best=True, compute_embeddings=True)
         
         # Save test results
         test_results_path = os.path.join(args.output_dir, f'{args.exp_name}_test_results.json')

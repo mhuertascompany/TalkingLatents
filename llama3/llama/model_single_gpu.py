@@ -90,10 +90,10 @@ class Attention(nn.Module):
 
         self.cache_k = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)
-        )
+        ).cuda()  # Add .cuda()
         self.cache_v = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)
-        )
+        ).cuda()  # Add .cuda()
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
@@ -213,4 +213,4 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         output = self.output(h).float()
-        return output
+        return output, h

@@ -145,7 +145,9 @@ class LatentFeatureEncoder(nn.Module):
             latent_features: (batch_size, latent_dim) or (latent_dim,)
         Returns:
             embeddings: (batch_size, embedding_dim) or (embedding_dim,)
+
         """
+
         return self.encoder(latent_features)
 
 
@@ -176,6 +178,7 @@ class MultimodalLlamaModel(nn.Module):
         """
         Forward pass with latent feature integration at embedding level
         """
+
         if self.fm_model is not None:
             self.fm_model.eval()  # Ensure fm_model is in eval mode
             batch_size, seq_len = input_ids.shape
