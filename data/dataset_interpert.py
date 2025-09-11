@@ -481,6 +481,7 @@ class StellarQuestionsDataset(Dataset):
         
         if self.features_array is not None and df_index is not None:
             features = torch.tensor(self.features_array[df_index].astype(np.float32))
+            masked_spectra = features
         else:
             features = masked_spectra
         

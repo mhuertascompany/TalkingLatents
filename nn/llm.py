@@ -176,12 +176,16 @@ class MultimodalLlamaModel(nn.Module):
         """
         Forward pass with latent feature integration at embedding level
         """
-        self.fm_model.eval()  # Ensure fm_model is in eval mode
-        batch_size, seq_len = input_ids.shape
-        with torch.no_grad():
-            _, _, latent_features = self.fm_model(input_spectra)
-        if self.num_spectral_features <= 1:
-            latent_features = latent_features.sum(dim=1)  # (batch_size, fm_features_dim)     
+        if self.fm_model is not None:
+            self.fm_model.eval()  # Ensure fm_model is in eval mode
+            batch_size, seq_len = input_ids.shape
+            with torch.no_grad():
+                _, _, latent_features = self.fm_model(input_spectra)
+            if self.num_spectral_features <= 1:
+                latent_features = latent_features.sum(dim=1)  # (batch_size, fm_features_dim)
+        else:
+            assert self.num_spectral_features == 1
+            latent_features = input_spectra.float() 
 
         return self._forward_training(input_ids, latent_features, special_token_positions)
 

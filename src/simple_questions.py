@@ -24,7 +24,7 @@ print("running from ", ROOT_DIR)
 
 from nn.llm import MultimodalLlamaModel
 from nn.models import MultiTaskRegressor
-from llama3.llama import Transformer, ModelArgs
+from llama3.llama.model_single_gpu import Transformer, ModelArgs
 from data.dataset_interpert import StellarQuestionsDataset, create_stellar_dataloaders, collate_fn
 from data.transforms import *
 from nn.train import LLMTrainer
@@ -44,99 +44,25 @@ print("number of gpus: ", torch.cuda.device_count())
 
 def setup():
     """
-    Setup distributed training with correct fairscale configuration for DDP
+    Setup the distributed training environment.
     """
-    import torch.distributed as dist
-    import fairscale.nn.model_parallel.initialize as fs_init
-    import os
-    import time
-    
-    # Check if we're in a SLURM distributed environment
-    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        # Multi-GPU/Multi-node distributed setup
-        world_size = int(os.environ["WORLD_SIZE"])
-        rank = int(os.environ["SLURM_PROCID"])
-        jobid = int(os.environ["SLURM_JOBID"])
-        gpus_per_node = torch.cuda.device_count()
-        model_parallel_size = 1
-        
-        print(f'jobid {jobid}')
-        print(f'gpus per node {gpus_per_node}')
-        print(f"Hello from rank {rank} of {world_size} where there are" \
-              f" {gpus_per_node} allocated GPUs per node. ", flush=True)
+    world_size    = int(os.environ["WORLD_SIZE"])
+    rank          = int(os.environ["SLURM_PROCID"])
+    jobid         = int(os.environ["SLURM_JOBID"])
+    gpus_per_node = torch.cuda.device_count()
+    print('jobid ', jobid)
+    print('gpus per node ', gpus_per_node)
+    print(f"Hello from rank {rank} of {world_size} where there are" \
+          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
 
-        # Set NCCL environment variables (use updated names)
-        os.environ["NCCL_TIMEOUT"] = "3600"
-        os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"  # Updated variable name
-        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"  # Updated variable name
-        os.environ["NCCL_DEBUG"] = "WARN"
-        
-        # Initialize the main process group FIRST
-        print(f"Initializing distributed training for rank {rank}...")
-        dist.init_process_group(
-            backend="nccl", 
-            rank=rank, 
-            world_size=world_size,
-            timeout=timedelta(seconds=1800)
-        )
-        
-        # Wait for all processes to initialize
-        dist.barrier()
-        
-        if rank == 0: 
-            print(f"Group initialized? {dist.is_initialized()}", flush=True)
-        
-        local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-        
-        # Set device with error checking
-        if local_rank < torch.cuda.device_count():
-            torch.cuda.set_device(local_rank)
-            print(f"rank: {rank}, local_rank: {local_rank}, device: {torch.cuda.current_device()}")
-        else:
-            raise RuntimeError(f"local_rank {local_rank} >= available GPUs {torch.cuda.device_count()}")
-        
-        # CRITICAL FIX: For DDP, always use model_parallel_size=1
-        # This means each GPU gets a full copy of the model (DDP replication)
-        # NOT model parallelism across GPUs
-        if not fs_init.model_parallel_is_initialized():
-            # Each rank should have the full model (model_parallel_size=1)
-            # even when using multiple GPUs for DDP
-            model_parallel_size = 1  # ALWAYS 1 for DDP!
-            fs_init.initialize_model_parallel(
-                model_parallel_size_=model_parallel_size,
-            )
-            if rank == 0: 
-                print(f"Fairscale initialized with model_parallel_size=1 for DDP", flush=True)
-        
-        dist.barrier()
-        
-    else:
-        # Single GPU setup
-        print("Single GPU training detected")
-        world_size = 1
-        gpus_per_node = torch.cuda.device_count()
-        local_rank = 0
-        
-        if gpus_per_node > 0:
-            torch.cuda.set_device(0)
-            print(f"Using GPU 0 of {gpus_per_node} available GPUs")
-        else:
-            print("No GPUs available, using CPU")
-        
-        # Initialize minimal distributed backend for fairscale compatibility
-        if not dist.is_initialized():
-            print("Initializing single-GPU distributed backend for fairscale compatibility...")
-            os.environ["MASTER_ADDR"] = "localhost"
-            os.environ["MASTER_PORT"] = "12355"
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend, rank=0, world_size=1)
-            print(f"Distributed backend '{backend}' initialized for single GPU")
-        
-        # Initialize fairscale for single GPU
-        if not fs_init.model_parallel_is_initialized():
-            fs_init.initialize_model_parallel(1)
-            print("Fairscale model parallel initialized for single GPU")
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
     
+    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
+    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+    torch.cuda.set_device(local_rank)
+    print("device set!!")
+    print(f"rank: {rank}, local_rank: {local_rank}")
     return local_rank, world_size, gpus_per_node
 
 def _load_llm_model_with_error_handling(args) -> Transformer:
@@ -243,7 +169,7 @@ def parse_args():
     # Data paths
     parser.add_argument('--json_file', type=str, default=JSON_PATH,
                        help='Path to stellar descriptions JSON file')
-    parser.add_argument('--features_file', type=str, default=None,
+    parser.add_argument('--features_file', type=str, default=FEATURES_PATH,
                        help='Path to spectral features numpy file')
     parser.add_argument('--output_dir', type=str, default='logs',
                        help='Output directory for logs and models')
@@ -251,7 +177,7 @@ def parse_args():
                        help='Experiment name')
     
     # Model configuration
-    parser.add_argument('--llm_model', type=str, default='Llama3.2-1B',
+    parser.add_argument('--llm_model', type=str, default='Llama3.1-8B',
                        help='Path to LLaMA model directory')
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048,
                        help='Spectral model embedding dimension')
@@ -370,28 +296,31 @@ def create_model_memory_optimized(args, device):
     """Create model with aggressive memory optimization"""
     
     # Set memory allocation config
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512'
+    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512'
     
     # Clear all memory at start
-    torch.cuda.empty_cache()
-    gc.collect()
+    # torch.cuda.empty_cache()
+    # gc.collect()
     
-    print("=== Initial Memory State ===")
-    print_detailed_memory()
+    # print("=== Initial Memory State ===")
+    # print_detailed_memory()
     
     # Get rank info
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     
     print(f"Loading models on rank {rank}/{world_size}")
-    
-    # CRITICAL: Load models on CPU first, then selectively move to GPU
-    spectral_model = _load_spectra_model()
 
+    if args.features_file is None:
     
-    # Keep spectral model on CPU if frozen to save GPU memory
-    
-    spectral_model = spectral_model.to(device)
+        spectral_model = _load_spectra_model()
+
+        
+        # Keep spectral model on CPU if frozen to save GPU memory
+        
+        spectral_model = spectral_model.to(device)
+    else:
+        spectral_model = None
     
     print("=== After Spectral Model ===")
     print_detailed_memory()
@@ -403,7 +332,7 @@ def create_model_memory_optimized(args, device):
             llm_model.gradient_checkpointing_enable()
             print("✓ Gradient checkpointing enabled for LLM")
     
-        if hasattr(spectral_model, 'gradient_checkpointing_enable'):
+        if hasattr(spectral_model, 'gradient_checkpointing_enable') and args.features_file is None:
             spectral_model.gradient_checkpointing_enable()
             print("✓ Gradient checkpointing enabled for spectral model")
     # Keep LLM on CPU if frozen to save GPU memory
@@ -427,13 +356,15 @@ def create_model_memory_optimized(args, device):
     
     print("=== After Multimodal Wrapper ===")
     print_detailed_memory()
+
+    print(args.checkpoint_dir)
     
     # Load checkpoint if exists
     if args.checkpoint_dir and os.path.exists(args.checkpoint_dir):
-        checkpoint_path = os.path.join(args.checkpoint_dir, 'clip_stellar.pth')
+        checkpoint_path = os.path.join(args.checkpoint_dir, 'interpert.pth')
         print(f"Loading checkpoint from {checkpoint_path}")
         model = load_checkpoints_ddp(model, checkpoint_path)
-    
+        
     # Move trainable projection layers to GPU
     print("Moving projection layers to GPU...")
     if hasattr(model, 'text_projection') and model.text_projection is not None:
@@ -456,8 +387,7 @@ def create_model_memory_optimized(args, device):
             model,
             device_ids=[device] if not args.freeze_llm or not args.freeze_spectral else None,
             find_unused_parameters=True,  # Essential for hybrid CPU/GPU
-            broadcast_buffers=False,
-            gradient_as_bucket_view=True
+            
         )
         print("✓ DDP applied")
     else:
