@@ -505,10 +505,9 @@ def create_model_memory_optimized(args, device):
         # Create a custom DDP that handles CPU/GPU hybrid models
         model = DDP(
             model,
-            device_ids=[device],
-            find_unused_parameters=False,     # We freeze big modules before DDP
-            broadcast_buffers=False,          # Reduce comms and buffer duplication
-            gradient_as_bucket_view=True      # More memory efficient
+            # Restore earlier behavior: only pin device_ids when unfrozen parts exist
+            device_ids=[device] if not args.freeze_llm or not args.freeze_spectral else None,
+            find_unused_parameters=True
         )
         print("✓ DDP applied")
     else:
