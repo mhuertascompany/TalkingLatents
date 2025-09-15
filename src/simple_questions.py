@@ -42,6 +42,13 @@ SPECTRA_WEIGHTS_PATH = "/data/DESA/logs/spec_decode2_2025-02-16/MultiTaskRegress
 print("number of gpus: ", torch.cuda.device_count())
 # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
+# Performance knobs: enable cuDNN autotuner and allow faster matmul where supported
+torch.backends.cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
+
 
 def setup():
     """
@@ -499,7 +506,7 @@ def create_model_memory_optimized(args, device):
         model = DDP(
             model,
             device_ids=[device],
-            find_unused_parameters=True,      # Essential for hybrid CPU/GPU
+            find_unused_parameters=False,     # We freeze big modules before DDP
             broadcast_buffers=False,          # Reduce comms and buffer duplication
             gradient_as_bucket_view=True      # More memory efficient
         )
@@ -887,7 +894,14 @@ def main():
     # Run final evaluation on test set
     if local_rank == 0:
         print("Running final evaluation on test set...")
-        test_results = trainer.predict(test_loader, local_rank, load_best=True, compute_embeddings=True)
+        # Be robust to different LLMTrainer.predict signatures across versions
+        try:
+            test_results = trainer.predict(test_loader, local_rank, load_best=True, compute_embeddings=True)
+        except TypeError:
+            try:
+                test_results = trainer.predict(test_loader, local_rank, tokenizer=tokenizer)
+            except TypeError:
+                test_results = trainer.predict(test_loader, local_rank)
         
         # Save test results
         test_results_path = os.path.join(args.output_dir, f'{args.exp_name}_test_results.json')

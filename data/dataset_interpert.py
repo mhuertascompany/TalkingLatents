@@ -586,6 +586,10 @@ def create_stellar_dataloaders(json_file: str,
     test_sampler = DistributedSampler(test_dataset, shuffle=False) if dist.is_initialized() else None
     
     # Create dataloaders
+    persistent = num_workers > 0
+    # Slight prefetch to overlap CPU and GPU work
+    prefetch = 2 if num_workers > 0 else None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -593,6 +597,8 @@ def create_stellar_dataloaders(json_file: str,
         shuffle=(train_sampler is None),
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch if prefetch is not None else 2,
         collate_fn=collate_fn,
         drop_last=False
     )
@@ -604,6 +610,8 @@ def create_stellar_dataloaders(json_file: str,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch if prefetch is not None else 2,
         collate_fn=collate_fn,
         drop_last=False
     )
@@ -615,6 +623,8 @@ def create_stellar_dataloaders(json_file: str,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch if prefetch is not None else 2,
         collate_fn=collate_fn,
         drop_last=False
     )
