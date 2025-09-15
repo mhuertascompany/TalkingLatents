@@ -819,7 +819,9 @@ def main():
     # model = create_model_dataparallel(args, device)
     # model = create_model_dataparallel_with_memory_tracking(args, device)
 
-    print(f"Model vocab_size: {model.base_model.params.vocab_size}")
+    # Handle DDP wrapper when accessing inner model attributes
+    inner_model = model.module if isinstance(model, DDP) else model
+    print(f"Model vocab_size: {inner_model.base_model.params.vocab_size}")
 
     # Create optimizer and scheduler
     print("Creating optimizer and scheduler...")
