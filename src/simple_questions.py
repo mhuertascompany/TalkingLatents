@@ -107,6 +107,7 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
     """Load LLaMA model with better error handling for checkpoint loading"""
     model_path, tokenizer_path = get_model_path(args)
     max_batch_size, max_seq_len = args.batch_size, args.max_seq_length
+    rank = dist.get_rank() if dist.is_initialized() else 0
     
     with open(Path(model_path) / "params.json", "r") as f:
         params = json.loads(f.read())
@@ -135,43 +136,46 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
     # Load checkpoints with better error handling
     checkpoints = sorted(Path(model_path).glob("*.pth"))
     if checkpoints:
-        print(f"Loading LLaMA checkpoint: {checkpoints[0]}")
-        try:
-            # Load weights on CPU to avoid GPU OOM; immediately free after load.
-            checkpoint = torch.load(checkpoints[0], map_location="cpu")
-            
-            # Print checkpoint info
-            if isinstance(checkpoint, dict):
-                checkpoint_keys = list(checkpoint.keys())[:10]  # First 10 keys
-                print(f"Checkpoint keys (first 10): {checkpoint_keys}")
+        if dist.is_initialized() and rank != 0:
+            print("Skipping checkpoint load on non-zero rank; weights will sync from rank 0 via DDP")
+        else:
+            print(f"Loading LLaMA checkpoint on rank {rank}: {checkpoints[0]}")
+            try:
+                # Load weights on CPU to avoid GPU OOM; immediately free after load.
+                checkpoint = torch.load(checkpoints[0], map_location="cpu")
                 
-                # Check if this is a nested checkpoint
-                if 'model' in checkpoint:
-                    checkpoint = checkpoint['model']
-                elif 'state_dict' in checkpoint:
-                    checkpoint = checkpoint['state_dict']
-            
-            # Try to load with strict=False first
-            missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
-            
-            if missing_keys:
-                print(f"Missing keys: {len(missing_keys)} (showing first 5)")
-                for key in missing_keys[:5]:
-                    print(f"  Missing: {key}")
-            
-            if unexpected_keys:
-                print(f"Unexpected keys: {len(unexpected_keys)} (showing first 5)")
-                for key in unexpected_keys[:5]:
-                    print(f"  Unexpected: {key}")
-            
-            print("✓ LLaMA model loaded successfully with partial weights")
-            # Free the checkpoint tensors to lower host RAM peak
-            del checkpoint
-            gc.collect()
-            
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Proceeding with randomly initialized model...")
+                # Print checkpoint info
+                if isinstance(checkpoint, dict):
+                    checkpoint_keys = list(checkpoint.keys())[:10]  # First 10 keys
+                    print(f"Checkpoint keys (first 10): {checkpoint_keys}")
+                    
+                    # Check if this is a nested checkpoint
+                    if 'model' in checkpoint:
+                        checkpoint = checkpoint['model']
+                    elif 'state_dict' in checkpoint:
+                        checkpoint = checkpoint['state_dict']
+                
+                # Try to load with strict=False first
+                missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+                
+                if missing_keys:
+                    print(f"Missing keys: {len(missing_keys)} (showing first 5)")
+                    for key in missing_keys[:5]:
+                        print(f"  Missing: {key}")
+                
+                if unexpected_keys:
+                    print(f"Unexpected keys: {len(unexpected_keys)} (showing first 5)")
+                    for key in unexpected_keys[:5]:
+                        print(f"  Unexpected: {key}")
+                
+                print("✓ LLaMA model loaded successfully with partial weights on rank 0")
+                # Free the checkpoint tensors to lower host RAM peak
+                del checkpoint
+                gc.collect()
+                
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                print("Proceeding with randomly initialized model...")
     else:
         print("No checkpoints found, using randomly initialized model")
     
@@ -501,6 +505,11 @@ def create_model_memory_optimized(args, device):
     # Apply DDP only if multi-GPU
     if world_size > 1:
         print(f"Applying DDP for distributed training (world_size={world_size})")
+        # Ensure rank 0 finished loading before broadcasting parameters
+        try:
+            dist.barrier()
+        except Exception:
+            pass
         
         # Create a custom DDP that handles CPU/GPU hybrid models
         model = DDP(
