@@ -7,6 +7,7 @@ SBATCH --ntasks-per-node=2           # 2 ranks = 2 GPUs
 SBATCH --cpus-per-task=20            # tune for your dataloader/tokenization
 SBATCH --hint=nomultithread
 SBATCH --time=23:00:00               # adjust as needed
+SBATCH --gres=gpu:2
 # Ensure 32 GB V100s (Jean Zay)
 SBATCH -C v100-32g
 # Logs
