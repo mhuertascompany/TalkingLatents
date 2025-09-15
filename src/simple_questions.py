@@ -354,7 +354,11 @@ def create_datasets_and_loaders(args, device):
     transf = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
 
     # Create cache directory for split consistency
-    cache_dir = os.path.join(args.output_dir, 'cache')
+    # In DDP, avoid concurrent writes to the same npz file (race -> BadZipFile).
+    # Use rank-specific cache dirs for ranks > 0 to prevent collisions.
+    cache_dir_base = os.path.join(args.output_dir, 'cache')
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    cache_dir = cache_dir_base if rank == 0 else f"{cache_dir_base}_r{rank}"
     os.makedirs(cache_dir, exist_ok=True)
 
     train_loader, val_loader, test_loader = create_stellar_dataloaders(
@@ -371,7 +375,10 @@ def create_datasets_and_loaders(args, device):
                                             max_length=args.max_seq_length,
                                             batch_size=args.batch_size,
                                             num_workers=args.num_workers,)
-    
+
+    # Optional: if rank > 0 and you want to reuse rank 0 cache next time,
+    # you can copy it or just rely on deterministic splitting.
+
 
     return train_loader, val_loader, test_loader
 
