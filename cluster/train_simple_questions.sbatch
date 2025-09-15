@@ -4,12 +4,13 @@
 SBATCH --job-name=tl-llm-ddp
 SBATCH --nodes=1
 SBATCH --ntasks-per-node=2           # 2 ranks = 2 GPUs
+SBATCH --gres=gpu:2
 SBATCH --cpus-per-task=20            # tune for your dataloader/tokenization
 SBATCH --hint=nomultithread
 SBATCH --time=23:00:00               # adjust as needed
-SBATCH --gres=gpu:2
+
 # Ensure 32 GB V100s (Jean Zay)
-SBATCH -C v100-32g
+##SBATCH -C v100-32g
 # Logs
 SBATCH --output=logs/slurm/%x-%j.out
 SBATCH --error=logs/slurm/%x-%j.err
