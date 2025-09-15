@@ -16,7 +16,8 @@ from torch.cuda.amp import autocast, GradScaler
 import gc
 
 import os
-os.system('pip install tiktoken fairscale fire blobfile')
+# NOTE: Avoid installing packages at runtime on clusters. Please
+# prepare your environment (conda/venv or modules) before submitting.
 import sys
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
@@ -31,10 +32,10 @@ from nn.train import LLMTrainer
 from util.utils import *
 # from nn.multimodal import setup
 
-JSON_PATH = '/data/TalkingLatents/data/dataset/stellar_descriptions_questions_short.json'
-FEATURES_PATH = '/data/TalkingLatents/logs/2025-07-29/features.npy'  # Optional, can be None to load all features on-the-fly
-MODEL_PATH = "/data/.llama/Llama3.1-8B"
-TOKENIZER_PATH = "/data/.llama/Llama3.1-8B/tokenizer.model"
+JSON_PATH = '/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_descriptions_questions_short.json'
+FEATURES_PATH = '/lustre/fswork/projects/rech/oxl/utl47bv/data/features.npy'  # Optional, can be None to load all features on-the-fly
+MODEL_PATH = "/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original"
+TOKENIZER_PATH = "/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original"
 SPECTRA_CONFIG_PATH = "/data/DESA/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra__decode_4_complete_config.yaml"
 SPECTRA_WEIGHTS_PATH = "/data/DESA/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth"
 
@@ -44,33 +45,56 @@ print("number of gpus: ", torch.cuda.device_count())
 
 def setup():
     """
-    Setup the distributed training environment with fairscale model parallel.
+    Setup the distributed training environment (SLURM-friendly, V100s).
+    - Robustly derives rank/world_size/local_rank from SLURM or torchrun env.
+    - Initializes NCCL backend and sets CUDA device.
+    - Attempts fairscale MP init if available, but does not require it.
     """
     import torch.distributed as dist
-    import fairscale.nn.model_parallel.initialize as fs_init
-    
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    jobid         = int(os.environ["SLURM_JOBID"])
+
+    # Derive distributed env from SLURM or torchrun
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
+    jobid = int(os.environ.get("SLURM_JOBID", 0))
+
+    # Ensure master addr/port are present for multi-task runs
+    if world_size > 1:
+        os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
+        # Choose a port deterministically from job id when available
+        default_port = 12910 + (jobid % 20000) if jobid else 12910
+        os.environ.setdefault("MASTER_PORT", str(default_port))
+
     gpus_per_node = torch.cuda.device_count()
     print('jobid ', jobid)
     print('gpus per node ', gpus_per_node)
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
+    print(
+        f"Hello from rank {rank} of {world_size} where there are {gpus_per_node} allocated GPUs per node.",
+        flush=True,
+    )
 
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+    # Initialize process group
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, init_method="env://")
+
+    if rank == 0:
+        print(f"Group initialized? {dist.is_initialized()}", flush=True)
+
+    # Map this process to its local GPU
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
-    
-    # Initialize fairscale model parallel for LLaMA
-    if not fs_init.model_parallel_is_initialized():
-        fs_init.initialize_model_parallel(1)  # 1 = use 1 GPU for model parallel
-        if rank == 0: print("Fairscale model parallel initialized", flush=True)
-    
+
+    # Initialize fairscale model parallel if available (optional)
+    try:
+        import fairscale.nn.model_parallel.initialize as fs_init
+        if not fs_init.model_parallel_is_initialized():
+            fs_init.initialize_model_parallel(1)  # 1 = no model parallel split
+            if rank == 0:
+                print("Fairscale model parallel initialized", flush=True)
+    except Exception as _:
+        if rank == 0:
+            print("Fairscale not available; continuing without model parallel.")
+
     return local_rank, world_size, gpus_per_node
 
 def _load_llm_model_with_error_handling(args) -> Transformer:
@@ -144,7 +168,7 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
 
 def get_model_path(args):
     model_name = args.llm_model
-    model_path = f"/data/.llama/{model_name}"
+    model_path = os.path.join(args.llm_root if hasattr(args, 'llm_root') else '/data/.llama', model_name)
     tokenizer_path = os.path.join(model_path, "tokenizer.model")
     return model_path, tokenizer_path
 
@@ -185,8 +209,10 @@ def parse_args():
                        help='Experiment name')
     
     # Model configuration
+    parser.add_argument('--llm_root', type=str, default=os.environ.get('LLM_ROOT', '/data/.llama'),
+                       help='Root directory containing LLaMA models (or set env LLM_ROOT)')
     parser.add_argument('--llm_model', type=str, default='Llama3.1-8B',
-                       help='Path to LLaMA model directory')
+                       help='LLaMA model name under --llm_root')
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048,
                        help='Spectral model embedding dimension')
     parser.add_argument('--hidden_dim', type=int, default=512,
@@ -830,6 +856,14 @@ def run_training_with_error_handling():
         if dist.is_initialized():
             dist.destroy_process_group()
         raise
+    finally:
+        # Cleanly tear down the process group on normal completion
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception:
+                pass
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -868,5 +902,3 @@ if __name__ == "__main__":
     print("=" * 80)
     
     run_training_with_error_handling()
-
-
