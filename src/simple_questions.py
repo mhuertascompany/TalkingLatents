@@ -58,12 +58,18 @@ def setup():
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
     jobid = int(os.environ.get("SLURM_JOBID", 0))
 
+    # For single-process, skip torch.distributed init entirely
+    if world_size == 1:
+        gpus_per_node = torch.cuda.device_count()
+        torch.cuda.set_device(local_rank if local_rank < gpus_per_node else 0)
+        print("Single-process run detected; skipping torch.distributed init.")
+        return (local_rank if local_rank < gpus_per_node else 0), world_size, gpus_per_node
+
     # Ensure master addr/port are present for multi-task runs
-    if world_size > 1:
-        os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
-        # Choose a port deterministically from job id when available
-        default_port = 12910 + (jobid % 20000) if jobid else 12910
-        os.environ.setdefault("MASTER_PORT", str(default_port))
+    os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
+    # Choose a port deterministically from job id when available
+    default_port = 12910 + (jobid % 20000) if jobid else 12910
+    os.environ.setdefault("MASTER_PORT", str(default_port))
 
     gpus_per_node = torch.cuda.device_count()
     print('jobid ', jobid)
