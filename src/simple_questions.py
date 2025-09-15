@@ -260,6 +260,8 @@ def parse_args():
                        help='LLaMA model name under --llm_root')
     parser.add_argument('--llm_path', type=str, default=None,
                        help='Full path to the LLaMA model directory (contains params.json). Overrides llm_root/llm_model.')
+    parser.add_argument('--llm_precision', type=str, default='fp16', choices=['fp32','fp16','bf16'],
+                       help='Precision to hold LLM weights on GPU (fp16 recommended on V100)')
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048,
                        help='Spectral model embedding dimension')
     parser.add_argument('--hidden_dim', type=int, default=512,
@@ -407,6 +409,18 @@ def create_model_memory_optimized(args, device):
     print_detailed_memory()
     
     llm_model = _load_llm_model(args)
+
+    # Downcast LLM weights to save memory on GPU
+    if args.llm_precision == 'fp16':
+        llm_model.half()
+        print("✓ LLM weights cast to float16")
+    elif args.llm_precision == 'bf16':
+        # bfloat16 not supported on V100; guard to avoid silent slowdowns
+        if torch.cuda.is_bf16_supported():
+            llm_model.to(dtype=torch.bfloat16)
+            print("✓ LLM weights cast to bfloat16")
+        else:
+            print("! bfloat16 not supported on this GPU; keeping default precision")
     
     if args.gradient_checkpointing:
         if hasattr(llm_model, 'gradient_checkpointing_enable'):
