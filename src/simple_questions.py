@@ -112,7 +112,8 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
         **params,
     )
 
-    # Create model on CPU first
+    # Create model; Llama allocates some caches on GPU internally.
+    # Keeping params on CPU initially reduces peak GPU usage during load.
     print("Creating LLaMA model on CPU...")
     model = Transformer(model_args)
     
@@ -129,6 +130,7 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
     if checkpoints:
         print(f"Loading LLaMA checkpoint: {checkpoints[0]}")
         try:
+            # Load weights on CPU to avoid GPU OOM; immediately free after load.
             checkpoint = torch.load(checkpoints[0], map_location="cpu")
             
             # Print checkpoint info
@@ -156,6 +158,9 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
                     print(f"  Unexpected: {key}")
             
             print("✓ LLaMA model loaded successfully with partial weights")
+            # Free the checkpoint tensors to lower host RAM peak
+            del checkpoint
+            gc.collect()
             
         except Exception as e:
             print(f"Error loading checkpoint: {e}")
