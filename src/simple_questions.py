@@ -173,10 +173,51 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
     return model
 
 def get_model_path(args):
-    model_name = args.llm_model
-    model_path = os.path.join(args.llm_root if hasattr(args, 'llm_root') else '/data/.llama', model_name)
-    tokenizer_path = os.path.join(model_path, "tokenizer.model")
-    return model_path, tokenizer_path
+    """Resolve LLaMA model directory robustly with multiple fallbacks.
+
+    Order:
+      1) --llm_path if provided and valid
+      2) --llm_root/--llm_model
+      3) --llm_root (directly)
+      4) --llm_root/--llm_model/original
+      5) --llm_root/original
+    A valid directory contains params.json and tokenizer.model.
+    """
+    def is_valid_model_dir(p: str) -> bool:
+        return os.path.isfile(os.path.join(p, 'params.json')) and os.path.isfile(os.path.join(p, 'tokenizer.model'))
+
+    candidates = []
+    if hasattr(args, 'llm_path') and args.llm_path:
+        candidates.append(args.llm_path)
+    # typical layout root/name
+    if hasattr(args, 'llm_root') and hasattr(args, 'llm_model'):
+        candidates.append(os.path.join(args.llm_root, args.llm_model))
+    # sometimes llm_root already points to the actual model dir
+    if hasattr(args, 'llm_root'):
+        candidates.append(args.llm_root)
+    # huggingface original subfolder variants
+    if hasattr(args, 'llm_root') and hasattr(args, 'llm_model'):
+        candidates.append(os.path.join(args.llm_root, args.llm_model, 'original'))
+    if hasattr(args, 'llm_root'):
+        candidates.append(os.path.join(args.llm_root, 'original'))
+
+    chosen = None
+    for c in candidates:
+        if c and is_valid_model_dir(c):
+            chosen = c
+            break
+
+    if not chosen:
+        msg = (
+            "Could not resolve LLaMA model directory. Checked: "
+            + ", ".join([str(c) for c in candidates if c])
+            + ". Ensure the chosen directory contains params.json and tokenizer.model."
+        )
+        raise FileNotFoundError(msg)
+
+    tokenizer_path = os.path.join(chosen, 'tokenizer.model')
+    print(f"Using LLaMA model directory: {chosen}")
+    return chosen, tokenizer_path
 
 
 
@@ -219,6 +260,8 @@ def parse_args():
                        help='Root directory containing LLaMA models (or set env LLM_ROOT)')
     parser.add_argument('--llm_model', type=str, default='Llama3.1-8B',
                        help='LLaMA model name under --llm_root')
+    parser.add_argument('--llm_path', type=str, default=None,
+                       help='Full path to the LLaMA model directory (contains params.json). Overrides llm_root/llm_model.')
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048,
                        help='Spectral model embedding dimension')
     parser.add_argument('--hidden_dim', type=int, default=512,
