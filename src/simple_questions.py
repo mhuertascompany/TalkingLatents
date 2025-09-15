@@ -473,6 +473,17 @@ def create_model_memory_optimized(args, device):
     print("=== After Projections ===")
     print_detailed_memory()
     
+    # Freeze large submodules BEFORE wrapping with DDP to avoid gradient buckets
+    if args.freeze_llm and hasattr(model, 'base_model') and model.base_model is not None:
+        for p in model.base_model.parameters():
+            p.requires_grad = False
+        print("✓ LLM base_model frozen (no grads/buckets)")
+
+    if args.freeze_spectral and hasattr(model, 'fm_model') and model.fm_model is not None:
+        for p in model.fm_model.parameters():
+            p.requires_grad = False
+        print("✓ Spectral fm_model frozen (no grads/buckets)")
+
     # Apply DDP only if multi-GPU
     if world_size > 1:
         print(f"Applying DDP for distributed training (world_size={world_size})")
@@ -480,9 +491,10 @@ def create_model_memory_optimized(args, device):
         # Create a custom DDP that handles CPU/GPU hybrid models
         model = DDP(
             model,
-            device_ids=[device] if not args.freeze_llm or not args.freeze_spectral else None,
-            find_unused_parameters=True,  # Essential for hybrid CPU/GPU
-            
+            device_ids=[device],
+            find_unused_parameters=True,      # Essential for hybrid CPU/GPU
+            broadcast_buffers=False,          # Reduce comms and buffer duplication
+            gradient_as_bucket_view=True      # More memory efficient
         )
         print("✓ DDP applied")
     else:
