@@ -687,32 +687,39 @@ def create_model_dataparallel(args, device):
 def create_optimizer_and_scheduler(model, args, train_loader):
     """Create optimizer and learning rate scheduler"""
     
-    params = list(model.named_parameters())
-    for name, param in params:
+    named_params = list(model.named_parameters())
+    for name, param in named_params:
         if 'base_model' in name and args.freeze_llm:
             param.requires_grad = False
         if 'fm_model' in name and args.freeze_spectral:
             param.requires_grad = False
-    
+
+    # Collect only tensors (Parameters) with requires_grad=True
+    opt_params = [p for n, p in named_params if isinstance(p, torch.nn.Parameter) and p.requires_grad]
+
+    if len(opt_params) == 0:
+        raise RuntimeError("No trainable parameters found for optimizer. Check freeze flags and model setup.")
+
     optimizer = torch.optim.AdamW(
-        params,
+        opt_params,
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
     
     # Create learning rate scheduler with warmup
-    total_steps = len(train_loader) * args.num_epochs
+    total_steps = max(1, len(train_loader) * args.num_epochs)
     warmup_steps = len(train_loader) * args.warmup_epochs
     
     def lr_lambda(step):
-        if step < warmup_steps:
-            return step / warmup_steps
-        else:
-            return 0.5 * (1 + np.cos(np.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
+        if warmup_steps > 0 and step < warmup_steps:
+            return step / float(warmup_steps)
+        # Cosine decay after warmup
+        denom = max(1, total_steps - max(0, warmup_steps))
+        return 0.5 * (1 + np.cos(np.pi * (step - max(0, warmup_steps)) / denom))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = GradScaler(enabled=args.use_amp)
-    
+
     return optimizer, scheduler, scaler
 
 def create_trainer(model, optimizer, criterion, train_loader, val_loader,scaler, device, args):
@@ -724,7 +731,7 @@ def create_trainer(model, optimizer, criterion, train_loader, val_loader,scaler,
     # Get world size
     world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-    with open("/data/TalkingLatents/src/llm_config.json", "r") as f:
+    with open(os.path.join(ROOT_DIR, "src", "llm_config.json"), "r") as f:
         config = json.load(f)
     lora_params = config['lora_params']
 
