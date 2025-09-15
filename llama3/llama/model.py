@@ -127,6 +127,8 @@ class Attention(nn.Module):
             init_method=lambda x: x,
         )
 
+        # Allocate caches on CPU first to avoid early GPU memory pressure.
+        # They are moved to the correct device on first forward with `to(xq)`.
         self.cache_k = torch.zeros(
             (
                 args.max_batch_size,
@@ -134,7 +136,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -142,7 +144,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
 
     def forward(
         self,
