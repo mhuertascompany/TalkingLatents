@@ -58,14 +58,7 @@ def setup():
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
     jobid = int(os.environ.get("SLURM_JOBID", 0))
 
-    # For single-process, skip torch.distributed init entirely
-    if world_size == 1:
-        gpus_per_node = torch.cuda.device_count()
-        torch.cuda.set_device(local_rank if local_rank < gpus_per_node else 0)
-        print("Single-process run detected; skipping torch.distributed init.")
-        return (local_rank if local_rank < gpus_per_node else 0), world_size, gpus_per_node
-
-    # Ensure master addr/port are present for multi-task runs
+    # Ensure master addr/port are present (even for single process)
     os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
     # Choose a port deterministically from job id when available
     default_port = 12910 + (jobid % 20000) if jobid else 12910
@@ -79,7 +72,7 @@ def setup():
         flush=True,
     )
 
-    # Initialize process group
+    # Initialize process group (works for world_size==1 as well)
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, init_method="env://")
 
@@ -90,7 +83,7 @@ def setup():
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
 
-    # Initialize fairscale model parallel if available (optional)
+    # Initialize fairscale model parallel if available (required for LLaMA even on 1 GPU)
     try:
         import fairscale.nn.model_parallel.initialize as fs_init
         if not fs_init.model_parallel_is_initialized():
