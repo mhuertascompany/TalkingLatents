@@ -95,12 +95,13 @@ class Trainer(object):
         
         return None
     
-    def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
+    def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False,
+            initial_min_loss=None, initial_best_acc=None):
         """
         Fits the model for the given number of epochs.
         """
-        min_loss = np.inf
-        best_acc = 0
+        min_loss = float(initial_min_loss) if initial_min_loss is not None else np.inf
+        best_acc = float(initial_best_acc) if initial_best_acc is not None else 0.0
         train_loss, val_loss,  = [], []
         train_acc, val_acc = [], []
         lrs = []
@@ -155,10 +156,27 @@ class Trainer(object):
                         improved = True
                 
                 if improved:
+                    # Save best composite checkpoint
                     model_name = f'{self.log_path}/{self.exp_name}.pth'
+                    resume_best = f'{self.log_path}/{self.exp_name}_resume_best.pth'
                     print(f"saving model at {model_name}...")
-                    torch.save(self.model.state_dict(), model_name)
-                    self.best_state_dict = self.model.state_dict()
+                    try:
+                        torch.save(self.model.state_dict(), model_name)
+                        self.best_state_dict = self.model.state_dict()
+                    except Exception as e:
+                        print(f"Warning saving state_dict only: {e}")
+                    try:
+                        torch.save({
+                            'epoch': epoch,
+                            'model': self.model.state_dict(),
+                            'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
+                            'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
+                            'scaler': self.scaler.state_dict() if self.scaler is not None else None,
+                            'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
+                            'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
+                        }, resume_best)
+                    except Exception as e:
+                        print(f"Warning saving best composite checkpoint: {e}")
                     # model_path, output_filename = save_compressed_checkpoint(
                     #                            self.model, model_name, res, use_zip=True )
                     epochs_without_improvement = 0
@@ -197,6 +215,20 @@ class Trainer(object):
                 if time.time() - global_time > (23.83 * 3600):
                     print("time limit reached")
                     break 
+
+            # Always save last composite checkpoint to allow exact resume
+            try:
+                torch.save({
+                    'epoch': epoch,
+                    'model': self.model.state_dict(),
+                    'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
+                    'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
+                    'scaler': self.scaler.state_dict() if self.scaler is not None else None,
+                    'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
+                    'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
+                }, f'{self.log_path}/{self.exp_name}_resume_last.pth')
+            except Exception as e:
+                print(f"Warning saving last composite checkpoint: {e}")
 
         return {"epochs":epochs, "train_loss": train_loss,
                  "val_loss": val_loss, "train_acc": train_acc,

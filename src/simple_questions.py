@@ -347,6 +347,10 @@ def parse_args():
                        help='Save checkpoint every N epochs')
     parser.add_argument('--compute_retrieval_metrics', action='store_true',
                        help='Compute retrieval metrics during training')
+
+    # Resume options
+    parser.add_argument('--resume_path', type=str, default=None,
+                        help='Path to a full training checkpoint (model+optimizer+scheduler+scaler) to resume')
     
     return parser.parse_args()
 
@@ -888,15 +892,72 @@ def main():
         print(f"  Output directory: {args.output_dir}")
         print("-" * 60)
     
+    # Resume if requested (model + optimizer + scheduler + scaler + epoch)
+    start_epoch = 0
+    if args.resume_path and os.path.exists(args.resume_path):
+        print(f"Resuming from checkpoint: {args.resume_path}")
+        ckpt = torch.load(args.resume_path, map_location='cpu')
+
+        # Load model state
+        state_dict = ckpt.get('model', ckpt)
+        # Handle possible nested keys
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        # Remove module. prefix if present/mismatched
+        new_state = {}
+        for k, v in state_dict.items():
+            nk = k
+            if nk.startswith('module.'):
+                nk = nk[7:]
+            new_state[nk] = v
+        try:
+            (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+            print("✓ Model weights loaded from resume checkpoint")
+        except Exception as e:
+            print(f"Warning: failed to load full model state strictly ({e}); trying strict=False")
+            (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+
+        # Optimizer / scheduler / scaler
+        try:
+            if 'optimizer' in ckpt and ckpt['optimizer'] is not None:
+                optimizer.load_state_dict(ckpt['optimizer'])
+                print("✓ Optimizer state loaded")
+        except Exception as e:
+            print(f"Warning loading optimizer state: {e}")
+        try:
+            if 'scheduler' in ckpt and ckpt['scheduler'] is not None and trainer.scheduler is not None:
+                trainer.scheduler.load_state_dict(ckpt['scheduler'])
+                print("✓ Scheduler state loaded")
+        except Exception as e:
+            print(f"Warning loading scheduler state: {e}")
+        try:
+            if 'scaler' in ckpt and ckpt['scaler'] is not None and scaler is not None:
+                scaler.load_state_dict(ckpt['scaler'])
+                print("✓ AMP scaler state loaded")
+        except Exception as e:
+            print(f"Warning loading scaler state: {e}")
+
+        # Epoch / best metrics
+        start_epoch = int(ckpt.get('epoch', -1)) + 1
+        initial_min_loss = ckpt.get('min_loss', None)
+        initial_best_acc = ckpt.get('best_acc', None)
+    else:
+        initial_min_loss = None
+        initial_best_acc = None
+
     # Train the model
     if args.train:
-        trainer.evaluate_validation_samples(local_rank, 0)
-        print("Starting training...")
+        if start_epoch == 0:
+            trainer.evaluate_validation_samples(local_rank, 0)
+        print(f"Starting training from epoch {start_epoch}...")
         results = trainer.fit(
             num_epochs=args.num_epochs,
             device=local_rank,
             early_stopping=args.early_stopping,
-            best='loss'  # Use loss for early stopping
+            best='loss',  # Use loss for early stopping
+            start_epoch=start_epoch,
+            initial_min_loss=initial_min_loss,
+            initial_best_acc=initial_best_acc,
         )
     
     # Run final evaluation on test set
