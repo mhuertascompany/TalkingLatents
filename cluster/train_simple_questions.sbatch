@@ -1,19 +1,19 @@
 #!/bin/bash
 # Real training on 2x V100 32GB with DDP
 
-SBATCH --job-name=tl-llm-ddp
-SBATCH --nodes=1
-SBATCH --ntasks-per-node=2           # 2 ranks = 2 GPUs
-SBATCH --gres=gpu:2
-SBATCH --cpus-per-task=20            # tune for your dataloader/tokenization
-SBATCH --hint=nomultithread
-SBATCH --time=23:00:00               # adjust as needed
+#SBATCH --job-name=tl-llm-ddp
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=3           # 2 ranks = 2 GPUs
+#SBATCH --gres=gpu:3
+#SBATCH --cpus-per-task=30            # tune for your dataloader/tokenization
+#SBATCH --hint=nomultithread
+#SBATCH --time=23:00:00               # adjust as needed
 
 # Ensure 32 GB V100s (Jean Zay)
-SBATCH -C v100-32g
+#SBATCH -C v100-32g
 # Logs
-SBATCH --output=logs/slurm/%x-%j.out
-SBATCH --error=logs/slurm/%x-%j.err
+#SBATCH --output=logs/slurm/%x-%j.out
+#SBATCH --error=logs/slurm/%x-%j.err
 
 # If you hit host RAM OOM during checkpoint load, consider uncommenting:
 #SBATCH --mem=128G
@@ -26,9 +26,7 @@ mkdir -p logs/slurm
 module purge
 module load pytorch-gpu/py3/2.2.0
 
-# Optional: activate your conda env instead
-# source ~/.bashrc
-# conda activate talking-latents
+
 
 # NCCL / allocator tuning
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
