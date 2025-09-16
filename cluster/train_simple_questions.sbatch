@@ -10,7 +10,7 @@ SBATCH --hint=nomultithread
 SBATCH --time=23:00:00               # adjust as needed
 
 # Ensure 32 GB V100s (Jean Zay)
-##SBATCH -C v100-32g
+SBATCH -C v100-32g
 # Logs
 SBATCH --output=logs/slurm/%x-%j.out
 SBATCH --error=logs/slurm/%x-%j.err
