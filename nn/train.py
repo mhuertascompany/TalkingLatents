@@ -155,17 +155,21 @@ class Trainer(object):
                         best_acc = current_objective
                         improved = True
                 
-                if improved:
-                    # Save best composite checkpoint
+                if improved and (not dist.is_initialized() or dist.get_rank() == 0):
+                    # Save best composite checkpoint (rank 0 only)
                     model_name = f'{self.log_path}/{self.exp_name}.pth'
                     resume_best = f'{self.log_path}/{self.exp_name}_resume_best.pth'
                     print(f"saving model at {model_name}...")
                     try:
-                        torch.save(self.model.state_dict(), model_name)
+                        # atomic save: write temp then move
+                        tmp_model = model_name + '.tmp'
+                        torch.save(self.model.state_dict(), tmp_model)
+                        os.replace(tmp_model, model_name)
                         self.best_state_dict = self.model.state_dict()
                     except Exception as e:
                         print(f"Warning saving state_dict only: {e}")
                     try:
+                        tmp_best = resume_best + '.tmp'
                         torch.save({
                             'epoch': epoch,
                             'model': self.model.state_dict(),
@@ -174,7 +178,8 @@ class Trainer(object):
                             'scaler': self.scaler.state_dict() if self.scaler is not None else None,
                             'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
                             'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
-                        }, resume_best)
+                        }, tmp_best)
+                        os.replace(tmp_best, resume_best)
                     except Exception as e:
                         print(f"Warning saving best composite checkpoint: {e}")
                     # model_path, output_filename = save_compressed_checkpoint(
@@ -196,17 +201,20 @@ class Trainer(object):
                 
                 lrs.append(current_lr)
                 
-                output_filename = f'{self.log_path}/{self.exp_name}.json'
-                with open(output_filename, "w") as f:
-                    json.dump(res, f, indent=2)
-                print(f"saved results at {output_filename}")
+                if (not dist.is_initialized()) or dist.get_rank() == 0:
+                    output_filename = f'{self.log_path}/{self.exp_name}.json'
+                    tmp_json = output_filename + '.tmp'
+                    with open(tmp_json, "w") as f:
+                        json.dump(res, f, indent=2)
+                    os.replace(tmp_json, output_filename)
+                    print(f"saved results at {output_filename}")
                 
                 print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 
                         f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()},'\
                   f'Time: {time.time() - start_time:.2f}s, Total Time: {(time.time() - global_time)/3600} hr', flush=True)
-                if epoch % 10 == 0:
+                if ((not dist.is_initialized()) or dist.get_rank() == 0) and (epoch % 10 == 0):
                     print(os.system('nvidia-smi'))
 
                 if epochs_without_improvement == early_stopping:
@@ -216,19 +224,23 @@ class Trainer(object):
                     print("time limit reached")
                     break 
 
-            # Always save last composite checkpoint to allow exact resume
-            try:
-                torch.save({
-                    'epoch': epoch,
-                    'model': self.model.state_dict(),
-                    'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
-                    'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
-                    'scaler': self.scaler.state_dict() if self.scaler is not None else None,
-                    'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
-                    'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
-                }, f'{self.log_path}/{self.exp_name}_resume_last.pth')
-            except Exception as e:
-                print(f"Warning saving last composite checkpoint: {e}")
+            # Always save last composite checkpoint to allow exact resume (rank 0 only)
+            if (not dist.is_initialized()) or dist.get_rank() == 0:
+                try:
+                    last_path = f'{self.log_path}/{self.exp_name}_resume_last.pth'
+                    tmp_last = last_path + '.tmp'
+                    torch.save({
+                        'epoch': epoch,
+                        'model': self.model.state_dict(),
+                        'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
+                        'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
+                        'scaler': self.scaler.state_dict() if self.scaler is not None else None,
+                        'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
+                        'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
+                    }, tmp_last)
+                    os.replace(tmp_last, last_path)
+                except Exception as e:
+                    print(f"Warning saving last composite checkpoint: {e}")
 
         return {"epochs":epochs, "train_loss": train_loss,
                  "val_loss": val_loss, "train_acc": train_acc,

@@ -914,51 +914,71 @@ def main():
     start_epoch = 0
     if args.resume_path and os.path.exists(args.resume_path):
         print(f"Resuming from checkpoint: {args.resume_path}")
-        ckpt = torch.load(args.resume_path, map_location='cpu')
+        try:
+            ckpt = torch.load(args.resume_path, map_location='cpu')
+        except Exception as e:
+            print(f"Resume checkpoint appears corrupted or unreadable: {e}")
+            # Try fallback to *_resume_best or warm-start from weights in the same dir
+            resume_dir = os.path.dirname(args.resume_path)
+            exp = os.path.basename(args.resume_path).split('_resume_')[0]
+            fallbacks = [
+                os.path.join(resume_dir, f"{exp}_resume_best.pth"),
+                os.path.join(resume_dir, f"{exp}.pth"),
+            ]
+            alt = next((p for p in fallbacks if os.path.isfile(p)), None)
+            if alt:
+                print(f"Trying fallback resume from: {alt}")
+                ckpt = torch.load(alt, map_location='cpu')
+            else:
+                print("No usable resume checkpoint found; proceeding without exact resume.")
+                ckpt = None
 
         # Load model state
-        state_dict = ckpt.get('model', ckpt)
+        state_dict = ckpt.get('model', ckpt) if ckpt is not None else None
         # Handle possible nested keys
-        if 'state_dict' in state_dict:
+        if state_dict is not None and 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
         # Remove module. prefix if present/mismatched
-        new_state = {}
-        for k, v in state_dict.items():
-            nk = k
-            if nk.startswith('module.'):
-                nk = nk[7:]
-            new_state[nk] = v
-        try:
-            (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
-            print("✓ Model weights loaded from resume checkpoint")
-        except Exception as e:
-            print(f"Warning: failed to load full model state strictly ({e}); trying strict=False")
-            (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+        if state_dict is not None:
+            new_state = {}
+            for k, v in state_dict.items():
+                nk = k
+                if nk.startswith('module.'):
+                    nk = nk[7:]
+                new_state[nk] = v
+            try:
+                (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+                print("✓ Model weights loaded from resume checkpoint")
+            except Exception as e:
+                print(f"Warning: failed to load full model state strictly ({e}); trying strict=False")
+                (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
 
         # Optimizer / scheduler / scaler
-        try:
-            if 'optimizer' in ckpt and ckpt['optimizer'] is not None:
-                optimizer.load_state_dict(ckpt['optimizer'])
-                print("✓ Optimizer state loaded")
-        except Exception as e:
-            print(f"Warning loading optimizer state: {e}")
-        try:
-            if 'scheduler' in ckpt and ckpt['scheduler'] is not None and trainer.scheduler is not None:
-                trainer.scheduler.load_state_dict(ckpt['scheduler'])
-                print("✓ Scheduler state loaded")
-        except Exception as e:
-            print(f"Warning loading scheduler state: {e}")
-        try:
-            if 'scaler' in ckpt and ckpt['scaler'] is not None and scaler is not None:
-                scaler.load_state_dict(ckpt['scaler'])
-                print("✓ AMP scaler state loaded")
-        except Exception as e:
-            print(f"Warning loading scaler state: {e}")
+        if ckpt is not None:
+            try:
+                if 'optimizer' in ckpt and ckpt['optimizer'] is not None:
+                    optimizer.load_state_dict(ckpt['optimizer'])
+                    print("✓ Optimizer state loaded")
+            except Exception as e:
+                print(f"Warning loading optimizer state: {e}")
+            try:
+                if 'scheduler' in ckpt and ckpt['scheduler'] is not None and trainer.scheduler is not None:
+                    trainer.scheduler.load_state_dict(ckpt['scheduler'])
+                    print("✓ Scheduler state loaded")
+            except Exception as e:
+                print(f"Warning loading scheduler state: {e}")
+            try:
+                if 'scaler' in ckpt and ckpt['scaler'] is not None and scaler is not None:
+                    scaler.load_state_dict(ckpt['scaler'])
+                    print("✓ AMP scaler state loaded")
+            except Exception as e:
+                print(f"Warning loading scaler state: {e}")
 
         # Epoch / best metrics
-        start_epoch = int(ckpt.get('epoch', -1)) + 1
-        initial_min_loss = ckpt.get('min_loss', None)
-        initial_best_acc = ckpt.get('best_acc', None)
+        if ckpt is not None:
+            start_epoch = int(ckpt.get('epoch', -1)) + 1
+            initial_min_loss = ckpt.get('min_loss', None)
+            initial_best_acc = ckpt.get('best_acc', None)
     else:
         initial_min_loss = None
         initial_best_acc = None
