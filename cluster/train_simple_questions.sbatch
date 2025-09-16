@@ -15,9 +15,6 @@
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 
-# If you hit host RAM OOM during checkpoint load, consider uncommenting:
-#SBATCH --mem=128G
-
 set -euo pipefail
 
 mkdir -p logs/slurm
