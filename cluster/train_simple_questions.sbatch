@@ -1,11 +1,11 @@
 #!/bin/bash
-# Real training on 2x V100 32GB with DDP
+# Real training on 3x V100 32GB with DDP
 
 #SBATCH --job-name=tl-llm-ddp
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=3           # 3ranks = 3 GPUs
 #SBATCH --gres=gpu:3
-#SBATCH --cpus-per-task=30            # tune for your dataloader/tokenization
+#SBATCH --cpus-per-task=20            # tune for your dataloader/tokenization
 #SBATCH --hint=nomultithread
 #SBATCH --time=05:00:00               # adjust as needed
 
@@ -37,7 +37,7 @@ LLM_PATH=/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/
 # Training knobs
 OUTDIR=logs/train_ddp
 EXP=llm_mp_loRA
-EPOCHS=10
+EPOCHS=40
 BATCH=2              # per-GPU
 MAXLEN=128
 WORKERS=8
