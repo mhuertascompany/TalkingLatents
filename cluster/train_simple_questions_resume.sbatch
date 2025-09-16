@@ -38,7 +38,7 @@ EPOCHS=50
 BATCH=2              # per-GPU
 MAXLEN=128
 WORKERS=8
-LR=1e-4
+LR=5e-5
 
 # Auto-detect the latest composite checkpoint (resume_last preferred)
 RESUME=${RESUME:-$(ls -t ${OUTDIR}/*/${EXP}_resume_last.pth 2>/dev/null | head -1 || true)}
@@ -82,4 +82,3 @@ else
       --checkpoint_dir "${LAST_RUN_DIR}" \
       --warmup_epochs 0
 fi
-

@@ -795,9 +795,10 @@ class LLMTrainer(Trainer):
         """
         Enhanced evaluation: first evaluate on sample questions, then run regular eval
         """
-        # Evaluate on validation samples first
-        if epoch % 1 == 0:  # Every epoch
-            self.evaluate_validation_samples(device, epoch)
+        # Evaluate on validation samples first (rank 0 only)
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
+            if epoch % 1 == 0:  # Every epoch
+                self.evaluate_validation_samples(device, epoch)
         
         # Then run regular evaluation
         return super().eval_epoch(device, epoch)
@@ -850,18 +851,18 @@ class LLMTrainer(Trainer):
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=100,
-                        temperature=0.7,
-                        top_p=0.9
+                        max_new_tokens=50,
+                        temperature=0.2,
+                        top_p=0.8
                     )
                 else:
                     generated_text, input_text, target_text, generation_log_probs = self.model.generate_response_from_batch(
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=100,
-                        temperature=0.7,
-                        top_p=0.9
+                        max_new_tokens=50,
+                        temperature=0.2,
+                        top_p=0.8
                     )
                 
                 # Calculate generation perplexity
