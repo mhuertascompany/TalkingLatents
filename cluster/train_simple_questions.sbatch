@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:3
 #SBATCH --cpus-per-task=30            # tune for your dataloader/tokenization
 #SBATCH --hint=nomultithread
-#SBATCH --time=23:00:00               # adjust as needed
+#SBATCH --time=05:00:00               # adjust as needed
 
 # Ensure 32 GB V100s (Jean Zay)
 #SBATCH -C v100-32g
