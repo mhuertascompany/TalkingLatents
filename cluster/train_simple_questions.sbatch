@@ -3,8 +3,8 @@
 
 #SBATCH --job-name=tl-llm-ddp
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=3           # 3ranks = 3 GPUs
-#SBATCH --gres=gpu:3
+#SBATCH --ntasks-per-node=2           # 3ranks = 3 GPUs
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=20            # tune for your dataloader/tokenization
 #SBATCH --hint=nomultithread
 #SBATCH --time=05:00:00               # adjust as needed
