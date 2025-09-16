@@ -476,11 +476,29 @@ def create_model_memory_optimized(args, device):
 
     print(args.checkpoint_dir)
     
-    # Load checkpoint if exists
-    if args.checkpoint_dir and os.path.exists(args.checkpoint_dir):
-        checkpoint_path = os.path.join(args.checkpoint_dir, 'interpert.pth')
-        print(f"Loading checkpoint from {checkpoint_path}")
-        model = load_checkpoints_ddp(model, checkpoint_path)
+    # Load plain model checkpoint for warm-start if provided and not using exact resume
+    if getattr(args, 'resume_path', None):
+        print("Exact resume requested; skipping warm-start checkpoint load here.")
+    elif args.checkpoint_dir and os.path.isdir(args.checkpoint_dir):
+        candidates = [
+            os.path.join(args.checkpoint_dir, f"{args.exp_name}.pth"),
+            os.path.join(args.checkpoint_dir, 'interpert.pth'),
+            os.path.join(args.checkpoint_dir, 'clip_stellar.pth'),
+        ]
+        # Fallback to any .pth in dir
+        glob_any = sorted(Path(args.checkpoint_dir).glob('*.pth'))
+        if glob_any:
+            candidates.append(str(glob_any[0]))
+
+        chosen = next((p for p in candidates if os.path.isfile(p)), None)
+        if chosen:
+            print(f"Warm-start: loading checkpoint weights from {chosen}")
+            try:
+                model = load_checkpoints_ddp(model, chosen)
+            except Exception as e:
+                print(f"Warning: failed to load checkpoint '{chosen}': {e}")
+        else:
+            print(f"No checkpoint file found in {args.checkpoint_dir}; continuing without warm-start")
         
     # Move trainable projection layers to GPU
     print("Moving projection layers to GPU...")
