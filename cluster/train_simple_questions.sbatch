@@ -27,7 +27,11 @@ module load pytorch-gpu/py3/2.2.0
 
 # NCCL / allocator tuning
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True,max_split_size_mb=64"}
+# Use allocator settings compatible with your PyTorch build.
+# Note: the correct syntax uses ':' not '='
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True,max_split_size_mb:64"}
+# If this still errors, fall back to only expandable_segments:
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Data/model paths (edit to your filesystem)
 JSON_FILE=/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_descriptions_questions_short.json
@@ -60,4 +64,3 @@ srun --kill-on-bad-exit=1 \
     --num_workers ${WORKERS} \
     --llm_precision fp16 \
     --use_amp
-
