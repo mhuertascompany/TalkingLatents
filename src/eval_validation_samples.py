@@ -150,6 +150,26 @@ def main():
         model.load_state_dict(sd, strict=False)
 
     # Trainer for evaluation helper
+    # Prepare lora_params (merge project config if present)
+    default_lora = {
+        'freeze_strategy': 'none',      # no LoRA changes needed for eval
+        'lora_start_epoch': 0,
+        'lora_lr_multiplier': 1.0,
+        'lora_rank': 8,
+        'lora_alpha': 8.0,
+        'lora_dropout': 0.0,
+        'lora_target_modules': []
+    }
+    try:
+        cfg_path = os.path.join(ROOT_DIR, 'src', 'llm_config.json')
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, 'r') as f:
+                cfg = json.load(f)
+            if 'lora_params' in cfg and isinstance(cfg['lora_params'], dict):
+                default_lora.update(cfg['lora_params'])
+    except Exception:
+        pass
+
     trainer = LLMTrainer(
         model=model,
         optimizer=None,
@@ -162,13 +182,7 @@ def main():
         exp_name=args.exp_name,
         max_iter=-1,
         scheduler=None,
-        lora_params={
-            'freeze_strategy': 'lora',
-            'lora_rank': 8,
-            'lora_alpha': 8.0,
-            'lora_dropout': 0.0,
-            'lora_target_modules': []
-        },
+        lora_params=default_lora,
         scaler=None,
         use_amp=(args.llm_precision in ['fp16','bf16']),
         max_grad_norm=0.0,
@@ -188,4 +202,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
