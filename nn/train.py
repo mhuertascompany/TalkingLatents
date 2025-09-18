@@ -45,7 +45,7 @@ class Trainer(object):
     A class that encapsulates the training loop for a PyTorch model.
     """
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
-                 scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None, use_amp=False,
+                 scheduler=None, val_dataloader=None,   max_iter=-1, scaler=None, use_amp=False,
                   grad_clip=False, max_grad_norm=1, log_path=None, exp_name=None, plot_every=None,
                    cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
                    update_func=lambda x: x):
@@ -321,7 +321,7 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item():.4f}")      
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         print("number of train_accs: ", all_accs, "total: ", total)
         return train_loss, all_accs/total
@@ -345,7 +345,7 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item():.4f}")
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         return val_loss, all_accs/total
 
@@ -525,7 +525,7 @@ class MaskedRegressorTrainer(Trainer):
             all_xs.append(x.cpu().numpy())
             all_decodes.append(decod_out.cpu().numpy())
             
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, np.concatenate(all_features, axis=0),\
@@ -1236,7 +1236,7 @@ class LLMTrainer(Trainer):
                     'recon': f'{avg_recon_loss:.4f}'
                 })
                 
-                if i > self.max_iter:
+                if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                     break
         
         print(f"\n{'='*80}")

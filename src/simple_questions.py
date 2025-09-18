@@ -303,8 +303,8 @@ def parse_args():
                        help='Number of warmup epochs')
     parser.add_argument('--early_stopping', type=int, default=20,
                        help='Early stopping patience')
-    parser.add_argument('--max_iter', type=int, default=2000,
-                       help='Maximum training iterations')
+    parser.add_argument('--max_iter', type=int, default=-1,
+                       help='Maximum training iterations per epoch (-1 for no cap)')
 
     parser.add_argument('--use_amp', action='store_true', default=False,
                        help='Use Automatic Mixed Precision training')
