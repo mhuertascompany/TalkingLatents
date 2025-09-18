@@ -5,12 +5,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=01:00:00
 # Ensure 32 GB V100s (Jean Zay)
 #SBATCH -C v100-32g
-#SBATCH --partition=gpu_p2
 # Logs
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
