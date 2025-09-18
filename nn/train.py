@@ -815,7 +815,8 @@ class LLMTrainer(Trainer):
         # Then run regular evaluation
         return super().eval_epoch(device, epoch)
         
-    def evaluate_validation_samples(self, device, epoch, num_samples=3):
+    def evaluate_validation_samples(self, device, epoch, num_samples=3,
+                                    max_new_tokens=50, temperature=0.2, top_p=0.8):
         """
         Evaluate model on actual validation samples with both teacher-forcing and generation perplexity
         """
@@ -863,18 +864,18 @@ class LLMTrainer(Trainer):
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=50,
-                        temperature=0.2,
-                        top_p=0.8
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p
                     )
                 else:
                     generated_text, input_text, target_text, generation_log_probs = self.model.generate_response_from_batch(
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=50,
-                        temperature=0.2,
-                        top_p=0.8
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p
                     )
                 
                 # Calculate generation perplexity

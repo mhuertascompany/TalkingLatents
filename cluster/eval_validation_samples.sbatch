@@ -35,6 +35,8 @@ LLM_PATH=/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/
 OUTDIR=logs/eval
 EXP=eval_run
 NUM_SAMPLES=${NUM_SAMPLES:-5}      # override at submit time with --export=NUM_SAMPLES=5
+SEED=${SEED:-42}                  # override with --export=SEED=123
+TOKENS=${TOKENS:-100}              # override at submit time with --export=TOKENS=150
 LLM_PREC=${LLM_PREC:-fp16}
 MAXLEN=${MAXLEN:-128}
 BATCH=${BATCH:-2}
@@ -57,10 +59,12 @@ if [[ -n "${RESUME:-}" ]]; then
       --exp_name "${EXP}" \
       --resume_path "${RESUME}" \
       --num_samples "${NUM_SAMPLES}" \
+      --random_seed "${SEED}" \
       --llm_precision "${LLM_PREC}" \
       --batch_size "${BATCH}" \
       --max_seq_length "${MAXLEN}" \
-      --num_workers "${WORKERS}"
+      --num_workers "${WORKERS}" \
+      --max_new_tokens "${TOKENS}"
 elif [[ -n "${WEIGHTS:-}" ]]; then
   echo "Evaluating with plain weights: ${WEIGHTS}"
   srun --kill-on-bad-exit=1 \
@@ -72,10 +76,12 @@ elif [[ -n "${WEIGHTS:-}" ]]; then
       --exp_name "${EXP}" \
       --weights "${WEIGHTS}" \
       --num_samples "${NUM_SAMPLES}" \
+      --random_seed "${SEED}" \
       --llm_precision "${LLM_PREC}" \
       --batch_size "${BATCH}" \
       --max_seq_length "${MAXLEN}" \
-      --num_workers "${WORKERS}"
+      --num_workers "${WORKERS}" \
+      --max_new_tokens "${TOKENS}"
 else
   echo "Evaluating with LLaMA base weights from: ${LLM_PATH}"
   srun --kill-on-bad-exit=1 \
@@ -86,9 +92,10 @@ else
       --output_dir "${OUTDIR}" \
       --exp_name "${EXP}" \
       --num_samples "${NUM_SAMPLES}" \
+      --random_seed "${SEED}" \
       --llm_precision "${LLM_PREC}" \
       --batch_size "${BATCH}" \
       --max_seq_length "${MAXLEN}" \
-      --num_workers "${WORKERS}"
+      --num_workers "${WORKERS}" \
+      --max_new_tokens "${TOKENS}"
 fi
-

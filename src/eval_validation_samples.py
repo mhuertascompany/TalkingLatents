@@ -79,6 +79,7 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=2)
     p.add_argument('--max_seq_length', type=int, default=128)
     p.add_argument('--num_workers', type=int, default=0)
+    p.add_argument('--random_seed', type=int, default=42)
     p.add_argument('--num_samples', type=int, default=3)
     p.add_argument('--temperature', type=float, default=0.2)
     p.add_argument('--top_p', type=float, default=0.8)
@@ -90,6 +91,16 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    # Seed for reproducibility of splits and any stochastic ops
+    try:
+        import numpy as np, random
+        random.seed(args.random_seed)
+        np.random.seed(args.random_seed)
+    except Exception:
+        pass
+    torch.manual_seed(args.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.random_seed)
     device = setup_single()
 
     # Data
@@ -106,7 +117,7 @@ def main():
         train_ratio=0.8,
         val_ratio=0.1,
         test_ratio=0.1,
-        random_state=42,
+        random_state=args.random_seed,
         num_spectral_features=1,
         cache_dir=os.path.join(args.output_dir, 'cache'),
         tokenizer_path=tokenizer_path,
@@ -194,8 +205,15 @@ def main():
     # so we rely on the values hardcoded in trainer (already set to low temp in recent patches).
 
     # Run evaluation samples
-    print(f"Evaluating {args.num_samples} validation samples...")
-    trainer.evaluate_validation_samples(device, epoch=0, num_samples=args.num_samples)
+    print(f"Evaluating {args.num_samples} validation samples (max_new_tokens={args.max_new_tokens}, temp={args.temperature}, top_p={args.top_p})...")
+    trainer.evaluate_validation_samples(
+        device,
+        epoch=0,
+        num_samples=args.num_samples,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    )
     out_file = os.path.join(args.output_dir, f"{args.exp_name}_validation_samples.json")
     print(f"Saved samples to: {out_file}")
 
