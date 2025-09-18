@@ -77,7 +77,7 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         return self._forward_no_cache(input_ids, latent_features, special_token_positions)
 
     def _forward_no_cache(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
-                          feature_start_indices: torch.Tensor) -> Dict[str, torch.Tensor]:
+                          feature_start_indices) -> Dict[str, torch.Tensor]:
         bsz, seqlen = input_ids.shape
         device = input_ids.device
 
@@ -87,12 +87,29 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         # Project spectral features to K token embeddings
         spec_tokens = self.projector(latent_features)  # (B, K, d_model)
 
+        # Normalize feature_start_indices to a 1D tensor of length bsz
+        if feature_start_indices is None:
+            fsi = torch.zeros(bsz, dtype=torch.long, device=input_ids.device)
+        elif isinstance(feature_start_indices, torch.Tensor):
+            if feature_start_indices.dim() == 0:
+                fsi = feature_start_indices.view(1).repeat(bsz)
+            elif feature_start_indices.dim() == 1:
+                if feature_start_indices.numel() == bsz:
+                    fsi = feature_start_indices.to(device=input_ids.device, dtype=torch.long)
+                else:
+                    fsi = torch.zeros(bsz, dtype=torch.long, device=input_ids.device)
+            else:
+                fsi = feature_start_indices.view(-1)[:bsz].to(device=input_ids.device, dtype=torch.long)
+        else:
+            # python int
+            fsi = torch.full((bsz,), int(feature_start_indices), dtype=torch.long, device=input_ids.device)
+
         # Insert the K tokens per sample at reserved positions
         K = self.num_spectral_features
         for b in range(bsz):
-            s = int(feature_start_indices[b].item())
+            s = int(fsi[b].item())
             e = s + K
-            if s >= 0 and e <= seqlen:
+            if 0 <= s and e <= seqlen:
                 token_embeddings[b, s:e, :] = spec_tokens[b]
             else:
                 # If indices are out of range, fallback to prefix insertion
