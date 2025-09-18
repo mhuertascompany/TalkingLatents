@@ -156,3 +156,72 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         out = out.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return attention_layer.wo(out)
 
+    @torch.no_grad()
+    def generate_response_from_batch(self,
+                                     batch_data: dict,
+                                     batch_idx: int = 0,
+                                     tokenizer=None,
+                                     max_new_tokens: int = 100,
+                                     temperature: float = 0.7,
+                                     top_p: float = 0.9) -> tuple:
+        """Greedy/top-p generate using the multi-token model.
+
+        Returns: (generated_text, input_text, target_text, generation_log_probs)
+        """
+        self.eval()
+
+        device = next(self.parameters()).device
+        input_ids = batch_data['input_ids'][batch_idx:batch_idx+1].to(device)
+        input_spectra = batch_data['masked_spectra'][batch_idx:batch_idx+1].to(device)
+        feature_start_idx = batch_data['feature_start_indices'][batch_idx].to(device)
+        answer_start_idx = batch_data['answer_start_indices'][batch_idx].item()
+
+        input_text = batch_data.get('input_texts', [''])[batch_idx]
+        target_text = batch_data.get('target_texts', [''])[batch_idx]
+
+        # Prompt = features + question (truncate before answer start)
+        prompt = input_ids[:, :max(1, min(answer_start_idx, input_ids.shape[1]))].clone()
+        gen_logps = []
+        gen_ids = []
+
+        def sample_top_p(logits: torch.Tensor) -> int:
+            if temperature > 0:
+                logits = logits / temperature
+            probs = torch.softmax(logits, dim=-1)
+            if 0 < top_p < 1.0:
+                sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+                cdf = torch.cumsum(sorted_probs, dim=-1)
+                cutoff = (cdf > top_p).float().argmax().item()
+                cutoff = max(1, cutoff)
+                sorted_probs = sorted_probs[:cutoff]
+                sorted_idx = sorted_idx[:cutoff]
+                sorted_probs = sorted_probs / sorted_probs.sum()
+                next_idx = torch.multinomial(sorted_probs, 1).item()
+                return sorted_idx[next_idx].item()
+            else:
+                return torch.multinomial(probs, 1).item()
+
+        for _ in range(max_new_tokens):
+            out = self._forward_no_cache(prompt, input_spectra.float().view(prompt.size(0), -1), feature_start_idx)
+            logits = out['logits'][:, -1, :].squeeze(0)
+            # Log prob of chosen token
+            if temperature > 0:
+                logits_scaled = logits / temperature
+            else:
+                logits_scaled = logits
+            probs = torch.softmax(logits_scaled, dim=-1)
+            next_token = sample_top_p(logits)
+            gen_ids.append(next_token)
+            gen_logps.append(torch.log(probs[next_token]).item())
+
+            # Append and continue
+            next_tensor = torch.tensor([[next_token]], device=device, dtype=prompt.dtype)
+            prompt = torch.cat([prompt, next_tensor], dim=1)
+
+            # Stop on EOS if available
+            if tokenizer is not None and hasattr(tokenizer, 'eos_id'):
+                if next_token == getattr(tokenizer, 'eos_id'):
+                    break
+
+        generated_text = tokenizer.decode(torch.tensor(gen_ids).cpu().numpy()) if tokenizer is not None else ''
+        return generated_text, input_text, target_text, gen_logps
