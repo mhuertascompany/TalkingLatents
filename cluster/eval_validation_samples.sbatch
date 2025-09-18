@@ -44,7 +44,7 @@ WORKERS=${WORKERS:-0}
 mkdir -p "${OUTDIR}"
 
 # You can provide one of these via --export at submit time:
-#   RESUME=/path/to/llm_mp_loRA_resume_best.pth  (composite checkpoint)
+RESUME=/lustre/fswork/projects/rech/oxl/utl47bv/python/TalkingLatents/logs/train_ddp/2025-09-18-16-29/llm_mp_loRA_resume_best.pth
 #   WEIGHTS=/path/to/llm_mp_loRA.pth            (plain weights)
 
 if [[ -n "${RESUME:-}" ]]; then
