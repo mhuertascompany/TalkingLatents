@@ -13,13 +13,13 @@ from src.simple_questions import (
     parse_args as base_parse_args,
     create_datasets_and_loaders,
     create_optimizer_and_scheduler,
-    create_trainer,
     save_config,
     _load_llm_model,
     _load_spectra_model,
     print_detailed_memory,
 )
 from nn.llm_multi import MultimodalLlamaModelMultiTokens
+from nn.train import LLMTrainer
 
 
 def build_model_multitok(args, device):
@@ -74,8 +74,38 @@ def main():
     print("Creating optimizer and scheduler...")
     optimizer, scheduler, scaler = create_optimizer_and_scheduler(model, args, train_loader)
 
-    print("Creating trainer...")
-    trainer = create_trainer(model, optimizer, torch.nn.CrossEntropyLoss(), train_loader, val_loader, scaler, local_rank, args)
+    print("Creating trainer (tuned LoRA config)...")
+    # Load tuned LoRA config (attention-only by default)
+    tuned_cfg_path = os.path.join(ROOT_DIR, 'src', 'llm_config_tuned.json')
+    if os.path.isfile(tuned_cfg_path):
+        with open(tuned_cfg_path, 'r') as f:
+            tuned_cfg = json.load(f)
+        lora_params = tuned_cfg.get('lora_params', {})
+    else:
+        # Fallback to base config if tuned not found
+        base_cfg_path = os.path.join(ROOT_DIR, 'src', 'llm_config.json')
+        with open(base_cfg_path, 'r') as f:
+            base_cfg = json.load(f)
+        lora_params = base_cfg.get('lora_params', {})
+
+    trainer = LLMTrainer(
+        model=model,
+        optimizer=optimizer,
+        criterion=torch.nn.CrossEntropyLoss(),
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        device=local_rank,
+        world_size=world_size,
+        output_dim=1,
+        scheduler=None,
+        max_iter=args.max_iter,
+        log_path=args.output_dir,
+        exp_name=args.exp_name,
+        lora_params=lora_params,
+        scaler=scaler,
+        use_amp=args.use_amp,
+        max_grad_norm=args.max_grad_norm,
+    )
     trainer.scheduler = scheduler
     trainer.tokenizer = tokenizer
 
@@ -97,4 +127,3 @@ if __name__ == '__main__':
     print("CLIP MULTIMODAL STELLAR MODEL TRAINING (Multi spectral tokens)")
     print("="*80)
     main()
-
