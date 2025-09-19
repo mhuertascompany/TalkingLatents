@@ -42,6 +42,11 @@ def build_model_multitok(args, device):
         hidden_dim=args.hidden_dim,
         num_spectral_features=args.num_spectral_features,
     ).to(device)
+    # Ensure projector matches precision to avoid implicit upcasts
+    if args.llm_precision == 'fp16':
+        model.projector.half()
+    elif args.llm_precision == 'bf16' and torch.cuda.is_bf16_supported():
+        model.projector.to(dtype=torch.bfloat16)
     return model
 
 
@@ -67,7 +72,15 @@ def main():
 
     if world_size > 1:
         print(f"Wrapping with DDP (world_size={world_size})")
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        # All large modules are frozen; avoid extra bookkeeping and big buckets
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            find_unused_parameters=False,
+            broadcast_buffers=False,
+            bucket_cap_mb=25,
+            gradient_as_bucket_view=True,
+        )
     else:
         print("Single GPU - no DDP")
 
