@@ -42,11 +42,8 @@ def build_model_multitok(args, device):
         hidden_dim=args.hidden_dim,
         num_spectral_features=args.num_spectral_features,
     ).to(device)
-    # Ensure projector matches precision to avoid implicit upcasts
-    if args.llm_precision == 'fp16':
-        model.projector.half()
-    elif args.llm_precision == 'bf16' and torch.cuda.is_bf16_supported():
-        model.projector.to(dtype=torch.bfloat16)
+    # Keep projector in float32 for numeric stability with GradScaler
+    # (base model runs in fp16/bf16; features are cast to projector dtype inside model)
     return model
 
 

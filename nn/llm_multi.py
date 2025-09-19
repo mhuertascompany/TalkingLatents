@@ -149,7 +149,7 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
 
         for layer in self.base_model.layers:
             if self.training and self.use_checkpoint:
-                h = checkpoint(layer_block, h, layer)
+                h = checkpoint(layer_block, h, layer, use_reentrant=False)
             else:
                 h = layer_block(h, layer)
 
