@@ -4,6 +4,7 @@ from typing import Optional, Tuple, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 # Reuse RoPE utils from the existing implementation
 from .llm import apply_rotary_emb, repeat_kv
@@ -44,12 +45,14 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
       - 'feature_length' in the batch should equal K (handled by dataset using num_spectral_features)
     """
 
-    def __init__(self, base_model, fm_model, latent_dim, hidden_dim, num_spectral_features: int = 8):
+    def __init__(self, base_model, fm_model, latent_dim, hidden_dim, num_spectral_features: int = 8,
+                 use_checkpoint: bool = True):
         super().__init__()
         self.base_model = base_model
         self.fm_model = fm_model
         self.embedding_dim = base_model.params.dim
         self.num_spectral_features = int(num_spectral_features)
+        self.use_checkpoint = use_checkpoint
         self.projector = SpectralTokensProjector(
             latent_dim=latent_dim,
             d_model=self.embedding_dim,
@@ -135,14 +138,20 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             mask = torch.full((seqlen, seqlen), float("-inf"), device=device, dtype=h.dtype)
             mask = torch.triu(mask, diagonal=1)
 
-        for layer in self.base_model.layers:
+        def layer_block(h_in, layer):
             # Attention
-            h_norm = layer.attention_norm(h)
+            h_norm = layer.attention_norm(h_in)
             attn_out = self._attn_no_cache(h_norm, freqs_cis, mask, layer.attention)
-            h = h + attn_out
+            h_mid = h_in + attn_out
             # FFN
-            ff_norm = layer.ffn_norm(h)
-            h = h + layer.feed_forward(ff_norm)
+            ff_norm = layer.ffn_norm(h_mid)
+            return h_mid + layer.feed_forward(ff_norm)
+
+        for layer in self.base_model.layers:
+            if self.training and self.use_checkpoint:
+                h = checkpoint(layer_block, h, layer)
+            else:
+                h = layer_block(h, layer)
 
         h = self.base_model.norm(h)
         logits = self.base_model.output(h).float()

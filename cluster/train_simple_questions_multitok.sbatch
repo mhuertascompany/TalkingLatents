@@ -36,11 +36,11 @@ OUTDIR=${OUTDIR:-logs/train_ddp}
 EXP=${EXP:-llm_multitok}
 EPOCHS=${EPOCHS:-10}
 BATCH=${BATCH:-2}              # per-GPU
-MAXLEN=${MAXLEN:-128}
+MAXLEN=${MAXLEN:-96}
 WORKERS=${WORKERS:-8}
 LR=${LR:-1e-4}
 WD=${WD:-1e-3}
-TOKS=${TOKS:-8}                # number of spectral tokens (K)
+TOKS=${TOKS:-4}                # number of spectral tokens (K)
 
 mkdir -p "${OUTDIR}"
 
