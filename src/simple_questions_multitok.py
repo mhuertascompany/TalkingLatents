@@ -65,15 +65,31 @@ def main():
 
     print("Creating multitoken multimodal model...")
     model = build_model_multitok(args, local_rank)
+
+    # Freeze large submodules BEFORE wrapping with DDP so the reducer
+    # only tracks truly trainable parameters (avoids unused-grad errors).
+    base = model
+    if isinstance(base, DDP):
+        base = base.module
+    if hasattr(base, 'base_model') and base.base_model is not None:
+        for p in base.base_model.parameters():
+            p.requires_grad = False
+        print("✓ Frozen base LLaMA parameters")
+    if hasattr(base, 'fm_model') and base.fm_model is not None:
+        for p in base.fm_model.parameters():
+            p.requires_grad = False
+        print("✓ Frozen spectral FM parameters")
     print_detailed_memory()
 
     if world_size > 1:
         print(f"Wrapping with DDP (world_size={world_size})")
-        # All large modules are frozen; avoid extra bookkeeping and big buckets
+        # All large modules are frozen; but LoRA may be applied later and
+        # not participate immediately. Use find_unused_parameters=True to
+        # avoid reducer errors in early epochs.
         model = DDP(
             model,
             device_ids=[local_rank],
-            find_unused_parameters=False,
+            find_unused_parameters=True,
             broadcast_buffers=False,
             bucket_cap_mb=25,
             gradient_as_bucket_view=True,
