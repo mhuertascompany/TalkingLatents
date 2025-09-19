@@ -73,6 +73,9 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
                     latent_features = latent_features.mean(dim=1)
         else:
             latent_features = input_spectra.float()  # (B, D)
+        # Ensure latent features match projector dtype/device
+        proj_param = next(self.projector.parameters())
+        latent_features = latent_features.to(device=proj_param.device, dtype=proj_param.dtype)
 
         return self._forward_no_cache(input_ids, latent_features, special_token_positions)
 
@@ -218,8 +221,12 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             else:
                 return torch.multinomial(probs, 1).item()
 
+        # Ensure features fed to projector match projector dtype/device
+        proj_param = next(self.projector.parameters())
+        features_vec = input_spectra.view(prompt.size(0), -1).to(device=proj_param.device, dtype=proj_param.dtype)
+
         for _ in range(max_new_tokens):
-            out = self._forward_no_cache(prompt, input_spectra.float().view(prompt.size(0), -1), feature_start_idx)
+            out = self._forward_no_cache(prompt, features_vec, feature_start_idx)
             logits = out['logits'][:, -1, :].squeeze(0)
             # Log prob of chosen token
             if temperature > 0:
