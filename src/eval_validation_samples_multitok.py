@@ -33,6 +33,8 @@ def parse_args():
     p.add_argument('--spectral_embedding_dim', type=int, default=2048)
     p.add_argument('--hidden_dim', type=int, default=512)
     p.add_argument('--num_spectral_features', type=int, default=4)
+    # Needed by _load_llm_model_with_error_handling in src/simple_questions.py
+    p.add_argument('--batch_size', type=int, default=1)
     p.add_argument('--max_seq_length', type=int, default=96)
     p.add_argument('--num_samples', type=int, default=5)
     p.add_argument('--max_new_tokens', type=int, default=100)
@@ -209,4 +211,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
