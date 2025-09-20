@@ -42,7 +42,7 @@ LLM_PREC=${LLM_PREC:-fp16}
 mkdir -p "${OUTDIR}"
 
 # You can provide one of:
-#   RESUME=/path/to/llm_multitok_resume_best.pth (composite)
+RESUME=/lustre/fswork/projects/rech/oxl/utl47bv/python/TalkingLatents/logs/train_ddp/2025-09-20-00-51/llm_multitok_resume_best.pth
 #   WEIGHTS=/path/to/llm_multitok.pth           (plain weights)
 
 SR_ARGS=(
