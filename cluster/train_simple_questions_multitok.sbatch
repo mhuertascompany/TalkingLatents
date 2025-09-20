@@ -60,5 +60,5 @@ srun --kill-on-bad-exit=1 \
     --num_spectral_features "${TOKS}" \
     --llm_precision fp16 \
     --use_amp \
-    --gradient_checkpointing
-
+    --gradient_checkpointing \
+    --max_iter -1
