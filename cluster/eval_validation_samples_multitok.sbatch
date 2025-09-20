@@ -30,7 +30,7 @@ LLM_PATH=/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/
 # Eval knobs (override with --export=VAR=VALUE)
 OUTDIR=${OUTDIR:-logs/eval_multitok}
 EXP=${EXP:-eval_multitok}
-NUM_SAMPLES=${NUM_SAMPLES:-5}
+NUM_SAMPLES=${NUM_SAMPLES:-15}
 TOKS=${TOKS:-4}
 MAXLEN=${MAXLEN:-96}
 TOKENS=${TOKENS:-100}          # generation length
