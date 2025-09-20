@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import Subset, DataLoader
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,7 +16,29 @@ sys.path.append(ROOT_DIR)
 from data.dataset_interpert import create_stellar_dataloaders, collate_fn
 from data.transforms import Compose, GeneralSpectrumPreprocessor, ToTensor
 from nn.llm_multi import MultimodalLlamaModelMultiTokens
-from src.simple_questions import _load_llm_model, _load_spectra_model
+from src.simple_questions import _load_llm_model, _load_spectra_model, get_model_path
+
+
+def setup_single():
+    """Initialize a single-process distributed + fairscale MP environment.
+
+    LLaMA uses VocabParallelEmbedding which requires fairscale model-parallel
+    to be initialized even on a single GPU.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA device required for evaluation")
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    if not dist.is_initialized():
+        dist.init_process_group("gloo", rank=0, world_size=1)
+    try:
+        import fairscale.nn.model_parallel.initialize as fs_init
+        if not fs_init.model_parallel_is_initialized():
+            fs_init.initialize_model_parallel(1)
+    except Exception:
+        pass
+    torch.cuda.set_device(0)
+    return 0
 
 
 def parse_args():
@@ -110,6 +133,9 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Initialize single-process distributed + fairscale model parallel
+    setup_single()
+
     # Seed
     random.seed(args.random_seed)
     np.random.seed(args.random_seed)
@@ -120,6 +146,8 @@ def main():
     device = torch.device('cuda', 0) if torch.cuda.is_available() else torch.device('cpu')
 
     # Build dataloaders with batch_size=1 for simple per-sample selection
+    # Resolve tokenizer path from model for consistent tokenization
+    _, tokenizer_path = get_model_path(args)
     spectral_features = None
     if args.features_file and os.path.exists(args.features_file):
         spectral_features = np.load(args.features_file)
@@ -136,7 +164,7 @@ def main():
         random_state=args.random_seed,
         num_spectral_features=args.num_spectral_features,
         cache_dir=os.path.join(args.output_dir, 'cache'),
-        tokenizer_path=None,
+        tokenizer_path=tokenizer_path,
         max_length=args.max_seq_length,
         batch_size=1,
         num_workers=0,
