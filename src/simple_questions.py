@@ -16,7 +16,8 @@ from torch.cuda.amp import autocast, GradScaler
 import gc
 
 import os
-os.system('pip install tiktoken fairscale fire blobfile')
+# NOTE: Avoid installing packages at runtime on clusters. Please
+# prepare your environment (conda/venv or modules) before submitting.
 import sys
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
@@ -31,52 +32,82 @@ from nn.train import LLMTrainer
 from util.utils import *
 # from nn.multimodal import setup
 
-JSON_PATH = '/data/TalkingLatents/data/dataset/stellar_descriptions_questions_short.json'
-FEATURES_PATH = '/data/TalkingLatents/logs/2025-07-29/features.npy'  # Optional, can be None to load all features on-the-fly
-MODEL_PATH = "/data/.llama/Llama3.1-8B"
-TOKENIZER_PATH = "/data/.llama/Llama3.1-8B/tokenizer.model"
+JSON_PATH = '/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_descriptions_questions_short.json'
+FEATURES_PATH = '/lustre/fswork/projects/rech/oxl/utl47bv/data/features.npy'  # Optional, can be None to load all features on-the-fly
+MODEL_PATH = "/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original"
+TOKENIZER_PATH = "/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original"
 SPECTRA_CONFIG_PATH = "/data/DESA/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra__decode_4_complete_config.yaml"
 SPECTRA_WEIGHTS_PATH = "/data/DESA/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth"
 
 print("number of gpus: ", torch.cuda.device_count())
 # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
+# Performance knobs: enable cuDNN autotuner and allow faster matmul where supported
+torch.backends.cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
+
 
 def setup():
     """
-    Setup the distributed training environment with fairscale model parallel.
+    Setup the distributed training environment (SLURM-friendly, V100s).
+    - Robustly derives rank/world_size/local_rank from SLURM or torchrun env.
+    - Initializes NCCL backend and sets CUDA device.
+    - Attempts fairscale MP init if available, but does not require it.
     """
     import torch.distributed as dist
-    import fairscale.nn.model_parallel.initialize as fs_init
-    
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    jobid         = int(os.environ["SLURM_JOBID"])
+
+    # Derive distributed env from SLURM or torchrun
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
+    jobid = int(os.environ.get("SLURM_JOBID", 0))
+
+    # Ensure master addr/port are present (even for single process)
+    os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
+    # Choose a port deterministically from job id when available
+    default_port = 12910 + (jobid % 20000) if jobid else 12910
+    os.environ.setdefault("MASTER_PORT", str(default_port))
+
     gpus_per_node = torch.cuda.device_count()
     print('jobid ', jobid)
     print('gpus per node ', gpus_per_node)
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
+    print(
+        f"Hello from rank {rank} of {world_size} where there are {gpus_per_node} allocated GPUs per node.",
+        flush=True,
+    )
 
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+    # Initialize process group (works for world_size==1 as well)
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, init_method="env://")
+
+    if rank == 0:
+        print(f"Group initialized? {dist.is_initialized()}", flush=True)
+
+    # Map this process to its local GPU
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
-    
-    # Initialize fairscale model parallel for LLaMA
-    if not fs_init.model_parallel_is_initialized():
-        fs_init.initialize_model_parallel(1)  # 1 = use 1 GPU for model parallel
-        if rank == 0: print("Fairscale model parallel initialized", flush=True)
-    
+
+    # Initialize fairscale model parallel if available (required for LLaMA even on 1 GPU)
+    try:
+        import fairscale.nn.model_parallel.initialize as fs_init
+        if not fs_init.model_parallel_is_initialized():
+            fs_init.initialize_model_parallel(1)  # 1 = no model parallel split
+            if rank == 0:
+                print("Fairscale model parallel initialized", flush=True)
+    except Exception as _:
+        if rank == 0:
+            print("Fairscale not available; continuing without model parallel.")
+
     return local_rank, world_size, gpus_per_node
 
 def _load_llm_model_with_error_handling(args) -> Transformer:
     """Load LLaMA model with better error handling for checkpoint loading"""
     model_path, tokenizer_path = get_model_path(args)
     max_batch_size, max_seq_len = args.batch_size, args.max_seq_length
+    rank = dist.get_rank() if dist.is_initialized() else 0
     
     with open(Path(model_path) / "params.json", "r") as f:
         params = json.loads(f.read())
@@ -89,7 +120,8 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
         **params,
     )
 
-    # Create model on CPU first
+    # Create model; Llama allocates some caches on GPU internally.
+    # Keeping params on CPU initially reduces peak GPU usage during load.
     print("Creating LLaMA model on CPU...")
     model = Transformer(model_args)
     
@@ -104,49 +136,97 @@ def _load_llm_model_with_error_handling(args) -> Transformer:
     # Load checkpoints with better error handling
     checkpoints = sorted(Path(model_path).glob("*.pth"))
     if checkpoints:
-        print(f"Loading LLaMA checkpoint: {checkpoints[0]}")
-        try:
-            checkpoint = torch.load(checkpoints[0], map_location="cpu")
-            
-            # Print checkpoint info
-            if isinstance(checkpoint, dict):
-                checkpoint_keys = list(checkpoint.keys())[:10]  # First 10 keys
-                print(f"Checkpoint keys (first 10): {checkpoint_keys}")
+        if dist.is_initialized() and rank != 0:
+            print("Skipping checkpoint load on non-zero rank; weights will sync from rank 0 via DDP")
+        else:
+            print(f"Loading LLaMA checkpoint on rank {rank}: {checkpoints[0]}")
+            try:
+                # Load weights on CPU to avoid GPU OOM; immediately free after load.
+                checkpoint = torch.load(checkpoints[0], map_location="cpu")
                 
-                # Check if this is a nested checkpoint
-                if 'model' in checkpoint:
-                    checkpoint = checkpoint['model']
-                elif 'state_dict' in checkpoint:
-                    checkpoint = checkpoint['state_dict']
-            
-            # Try to load with strict=False first
-            missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
-            
-            if missing_keys:
-                print(f"Missing keys: {len(missing_keys)} (showing first 5)")
-                for key in missing_keys[:5]:
-                    print(f"  Missing: {key}")
-            
-            if unexpected_keys:
-                print(f"Unexpected keys: {len(unexpected_keys)} (showing first 5)")
-                for key in unexpected_keys[:5]:
-                    print(f"  Unexpected: {key}")
-            
-            print("✓ LLaMA model loaded successfully with partial weights")
-            
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Proceeding with randomly initialized model...")
+                # Print checkpoint info
+                if isinstance(checkpoint, dict):
+                    checkpoint_keys = list(checkpoint.keys())[:10]  # First 10 keys
+                    print(f"Checkpoint keys (first 10): {checkpoint_keys}")
+                    
+                    # Check if this is a nested checkpoint
+                    if 'model' in checkpoint:
+                        checkpoint = checkpoint['model']
+                    elif 'state_dict' in checkpoint:
+                        checkpoint = checkpoint['state_dict']
+                
+                # Try to load with strict=False first
+                missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+                
+                if missing_keys:
+                    print(f"Missing keys: {len(missing_keys)} (showing first 5)")
+                    for key in missing_keys[:5]:
+                        print(f"  Missing: {key}")
+                
+                if unexpected_keys:
+                    print(f"Unexpected keys: {len(unexpected_keys)} (showing first 5)")
+                    for key in unexpected_keys[:5]:
+                        print(f"  Unexpected: {key}")
+                
+                print("✓ LLaMA model loaded successfully with partial weights on rank 0")
+                # Free the checkpoint tensors to lower host RAM peak
+                del checkpoint
+                gc.collect()
+                
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                print("Proceeding with randomly initialized model...")
     else:
         print("No checkpoints found, using randomly initialized model")
     
     return model
 
 def get_model_path(args):
-    model_name = args.llm_model
-    model_path = f"/data/.llama/{model_name}"
-    tokenizer_path = os.path.join(model_path, "tokenizer.model")
-    return model_path, tokenizer_path
+    """Resolve LLaMA model directory robustly with multiple fallbacks.
+
+    Order:
+      1) --llm_path if provided and valid
+      2) --llm_root/--llm_model
+      3) --llm_root (directly)
+      4) --llm_root/--llm_model/original
+      5) --llm_root/original
+    A valid directory contains params.json and tokenizer.model.
+    """
+    def is_valid_model_dir(p: str) -> bool:
+        return os.path.isfile(os.path.join(p, 'params.json')) and os.path.isfile(os.path.join(p, 'tokenizer.model'))
+
+    candidates = []
+    if hasattr(args, 'llm_path') and args.llm_path:
+        candidates.append(args.llm_path)
+    # typical layout root/name
+    if hasattr(args, 'llm_root') and hasattr(args, 'llm_model'):
+        candidates.append(os.path.join(args.llm_root, args.llm_model))
+    # sometimes llm_root already points to the actual model dir
+    if hasattr(args, 'llm_root'):
+        candidates.append(args.llm_root)
+    # huggingface original subfolder variants
+    if hasattr(args, 'llm_root') and hasattr(args, 'llm_model'):
+        candidates.append(os.path.join(args.llm_root, args.llm_model, 'original'))
+    if hasattr(args, 'llm_root'):
+        candidates.append(os.path.join(args.llm_root, 'original'))
+
+    chosen = None
+    for c in candidates:
+        if c and is_valid_model_dir(c):
+            chosen = c
+            break
+
+    if not chosen:
+        msg = (
+            "Could not resolve LLaMA model directory. Checked: "
+            + ", ".join([str(c) for c in candidates if c])
+            + ". Ensure the chosen directory contains params.json and tokenizer.model."
+        )
+        raise FileNotFoundError(msg)
+
+    tokenizer_path = os.path.join(chosen, 'tokenizer.model')
+    print(f"Using LLaMA model directory: {chosen}")
+    return chosen, tokenizer_path
 
 
 
@@ -185,8 +265,14 @@ def parse_args():
                        help='Experiment name')
     
     # Model configuration
+    parser.add_argument('--llm_root', type=str, default=os.environ.get('LLM_ROOT', '/data/.llama'),
+                       help='Root directory containing LLaMA models (or set env LLM_ROOT)')
     parser.add_argument('--llm_model', type=str, default='Llama3.1-8B',
-                       help='Path to LLaMA model directory')
+                       help='LLaMA model name under --llm_root')
+    parser.add_argument('--llm_path', type=str, default=None,
+                       help='Full path to the LLaMA model directory (contains params.json). Overrides llm_root/llm_model.')
+    parser.add_argument('--llm_precision', type=str, default='fp16', choices=['fp32','fp16','bf16'],
+                       help='Precision to hold LLM weights on GPU (fp16 recommended on V100)')
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048,
                        help='Spectral model embedding dimension')
     parser.add_argument('--hidden_dim', type=int, default=512,
@@ -217,8 +303,8 @@ def parse_args():
                        help='Number of warmup epochs')
     parser.add_argument('--early_stopping', type=int, default=20,
                        help='Early stopping patience')
-    parser.add_argument('--max_iter', type=int, default=2000,
-                       help='Maximum training iterations')
+    parser.add_argument('--max_iter', type=int, default=-1,
+                       help='Maximum training iterations per epoch (-1 for no cap)')
 
     parser.add_argument('--use_amp', action='store_true', default=False,
                        help='Use Automatic Mixed Precision training')
@@ -261,6 +347,10 @@ def parse_args():
                        help='Save checkpoint every N epochs')
     parser.add_argument('--compute_retrieval_metrics', action='store_true',
                        help='Compute retrieval metrics during training')
+
+    # Resume options
+    parser.add_argument('--resume_path', type=str, default=None,
+                        help='Path to a full training checkpoint (model+optimizer+scheduler+scaler) to resume')
     
     return parser.parse_args()
 
@@ -279,7 +369,11 @@ def create_datasets_and_loaders(args, device):
     transf = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
 
     # Create cache directory for split consistency
-    cache_dir = os.path.join(args.output_dir, 'cache')
+    # In DDP, avoid concurrent writes to the same npz file (race -> BadZipFile).
+    # Use rank-specific cache dirs for ranks > 0 to prevent collisions.
+    cache_dir_base = os.path.join(args.output_dir, 'cache')
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    cache_dir = cache_dir_base if rank == 0 else f"{cache_dir_base}_r{rank}"
     os.makedirs(cache_dir, exist_ok=True)
 
     train_loader, val_loader, test_loader = create_stellar_dataloaders(
@@ -296,7 +390,10 @@ def create_datasets_and_loaders(args, device):
                                             max_length=args.max_seq_length,
                                             batch_size=args.batch_size,
                                             num_workers=args.num_workers,)
-    
+
+    # Optional: if rank > 0 and you want to reuse rank 0 cache next time,
+    # you can copy it or just rely on deterministic splitting.
+
 
     return train_loader, val_loader, test_loader
 
@@ -334,6 +431,18 @@ def create_model_memory_optimized(args, device):
     print_detailed_memory()
     
     llm_model = _load_llm_model(args)
+
+    # Downcast LLM weights to save memory on GPU
+    if args.llm_precision == 'fp16':
+        llm_model.half()
+        print("✓ LLM weights cast to float16")
+    elif args.llm_precision == 'bf16':
+        # bfloat16 not supported on V100; guard to avoid silent slowdowns
+        if torch.cuda.is_bf16_supported():
+            llm_model.to(dtype=torch.bfloat16)
+            print("✓ LLM weights cast to bfloat16")
+        else:
+            print("! bfloat16 not supported on this GPU; keeping default precision")
     
     if args.gradient_checkpointing:
         if hasattr(llm_model, 'gradient_checkpointing_enable'):
@@ -367,11 +476,29 @@ def create_model_memory_optimized(args, device):
 
     print(args.checkpoint_dir)
     
-    # Load checkpoint if exists
-    if args.checkpoint_dir and os.path.exists(args.checkpoint_dir):
-        checkpoint_path = os.path.join(args.checkpoint_dir, 'interpert.pth')
-        print(f"Loading checkpoint from {checkpoint_path}")
-        model = load_checkpoints_ddp(model, checkpoint_path)
+    # Load plain model checkpoint for warm-start if provided and not using exact resume
+    if getattr(args, 'resume_path', None):
+        print("Exact resume requested; skipping warm-start checkpoint load here.")
+    elif args.checkpoint_dir and os.path.isdir(args.checkpoint_dir):
+        candidates = [
+            os.path.join(args.checkpoint_dir, f"{args.exp_name}.pth"),
+            os.path.join(args.checkpoint_dir, 'interpert.pth'),
+            os.path.join(args.checkpoint_dir, 'clip_stellar.pth'),
+        ]
+        # Fallback to any .pth in dir
+        glob_any = sorted(Path(args.checkpoint_dir).glob('*.pth'))
+        if glob_any:
+            candidates.append(str(glob_any[0]))
+
+        chosen = next((p for p in candidates if os.path.isfile(p)), None)
+        if chosen:
+            print(f"Warm-start: loading checkpoint weights from {chosen}")
+            try:
+                model = load_checkpoints_ddp(model, chosen)
+            except Exception as e:
+                print(f"Warning: failed to load checkpoint '{chosen}': {e}")
+        else:
+            print(f"No checkpoint file found in {args.checkpoint_dir}; continuing without warm-start")
         
     # Move trainable projection layers to GPU
     print("Moving projection layers to GPU...")
@@ -386,16 +513,32 @@ def create_model_memory_optimized(args, device):
     print("=== After Projections ===")
     print_detailed_memory()
     
+    # Freeze large submodules BEFORE wrapping with DDP to avoid gradient buckets
+    if args.freeze_llm and hasattr(model, 'base_model') and model.base_model is not None:
+        for p in model.base_model.parameters():
+            p.requires_grad = False
+        print("✓ LLM base_model frozen (no grads/buckets)")
+
+    if args.freeze_spectral and hasattr(model, 'fm_model') and model.fm_model is not None:
+        for p in model.fm_model.parameters():
+            p.requires_grad = False
+        print("✓ Spectral fm_model frozen (no grads/buckets)")
+
     # Apply DDP only if multi-GPU
     if world_size > 1:
         print(f"Applying DDP for distributed training (world_size={world_size})")
+        # Ensure rank 0 finished loading before broadcasting parameters
+        try:
+            dist.barrier()
+        except Exception:
+            pass
         
         # Create a custom DDP that handles CPU/GPU hybrid models
         model = DDP(
             model,
+            # Restore earlier behavior: only pin device_ids when unfrozen parts exist
             device_ids=[device] if not args.freeze_llm or not args.freeze_spectral else None,
-            find_unused_parameters=True,  # Essential for hybrid CPU/GPU
-            
+            find_unused_parameters=True
         )
         print("✓ DDP applied")
     else:
@@ -614,32 +757,39 @@ def create_model_dataparallel(args, device):
 def create_optimizer_and_scheduler(model, args, train_loader):
     """Create optimizer and learning rate scheduler"""
     
-    params = list(model.named_parameters())
-    for name, param in params:
+    named_params = list(model.named_parameters())
+    for name, param in named_params:
         if 'base_model' in name and args.freeze_llm:
             param.requires_grad = False
         if 'fm_model' in name and args.freeze_spectral:
             param.requires_grad = False
-    
+
+    # Collect only tensors (Parameters) with requires_grad=True
+    opt_params = [p for n, p in named_params if isinstance(p, torch.nn.Parameter) and p.requires_grad]
+
+    if len(opt_params) == 0:
+        raise RuntimeError("No trainable parameters found for optimizer. Check freeze flags and model setup.")
+
     optimizer = torch.optim.AdamW(
-        params,
+        opt_params,
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
     
     # Create learning rate scheduler with warmup
-    total_steps = len(train_loader) * args.num_epochs
+    total_steps = max(1, len(train_loader) * args.num_epochs)
     warmup_steps = len(train_loader) * args.warmup_epochs
     
     def lr_lambda(step):
-        if step < warmup_steps:
-            return step / warmup_steps
-        else:
-            return 0.5 * (1 + np.cos(np.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
+        if warmup_steps > 0 and step < warmup_steps:
+            return step / float(warmup_steps)
+        # Cosine decay after warmup
+        denom = max(1, total_steps - max(0, warmup_steps))
+        return 0.5 * (1 + np.cos(np.pi * (step - max(0, warmup_steps)) / denom))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = GradScaler(enabled=args.use_amp)
-    
+
     return optimizer, scheduler, scaler
 
 def create_trainer(model, optimizer, criterion, train_loader, val_loader,scaler, device, args):
@@ -651,7 +801,7 @@ def create_trainer(model, optimizer, criterion, train_loader, val_loader,scaler,
     # Get world size
     world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-    with open("/data/TalkingLatents/src/llm_config.json", "r") as f:
+    with open(os.path.join(ROOT_DIR, "src", "llm_config.json"), "r") as f:
         config = json.load(f)
     lora_params = config['lora_params']
 
@@ -725,7 +875,9 @@ def main():
     # model = create_model_dataparallel(args, device)
     # model = create_model_dataparallel_with_memory_tracking(args, device)
 
-    print(f"Model vocab_size: {model.base_model.params.vocab_size}")
+    # Handle DDP wrapper when accessing inner model attributes
+    inner_model = model.module if isinstance(model, DDP) else model
+    print(f"Model vocab_size: {inner_model.base_model.params.vocab_size}")
 
     # Create optimizer and scheduler
     print("Creating optimizer and scheduler...")
@@ -758,21 +910,105 @@ def main():
         print(f"  Output directory: {args.output_dir}")
         print("-" * 60)
     
+    # Resume if requested (model + optimizer + scheduler + scaler + epoch)
+    start_epoch = 0
+    if args.resume_path and os.path.exists(args.resume_path):
+        print(f"Resuming from checkpoint: {args.resume_path}")
+        try:
+            ckpt = torch.load(args.resume_path, map_location='cpu')
+        except Exception as e:
+            print(f"Resume checkpoint appears corrupted or unreadable: {e}")
+            # Try fallback to *_resume_best or warm-start from weights in the same dir
+            resume_dir = os.path.dirname(args.resume_path)
+            exp = os.path.basename(args.resume_path).split('_resume_')[0]
+            fallbacks = [
+                os.path.join(resume_dir, f"{exp}_resume_best.pth"),
+                os.path.join(resume_dir, f"{exp}.pth"),
+            ]
+            alt = next((p for p in fallbacks if os.path.isfile(p)), None)
+            if alt:
+                print(f"Trying fallback resume from: {alt}")
+                ckpt = torch.load(alt, map_location='cpu')
+            else:
+                print("No usable resume checkpoint found; proceeding without exact resume.")
+                ckpt = None
+
+        # Load model state
+        state_dict = ckpt.get('model', ckpt) if ckpt is not None else None
+        # Handle possible nested keys
+        if state_dict is not None and 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        # Remove module. prefix if present/mismatched
+        if state_dict is not None:
+            new_state = {}
+            for k, v in state_dict.items():
+                nk = k
+                if nk.startswith('module.'):
+                    nk = nk[7:]
+                new_state[nk] = v
+            try:
+                (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+                print("✓ Model weights loaded from resume checkpoint")
+            except Exception as e:
+                print(f"Warning: failed to load full model state strictly ({e}); trying strict=False")
+                (model.module if isinstance(model, DDP) else model).load_state_dict(new_state, strict=False)
+
+        # Optimizer / scheduler / scaler
+        if ckpt is not None:
+            try:
+                if 'optimizer' in ckpt and ckpt['optimizer'] is not None:
+                    optimizer.load_state_dict(ckpt['optimizer'])
+                    print("✓ Optimizer state loaded")
+            except Exception as e:
+                print(f"Warning loading optimizer state: {e}")
+            try:
+                if 'scheduler' in ckpt and ckpt['scheduler'] is not None and trainer.scheduler is not None:
+                    trainer.scheduler.load_state_dict(ckpt['scheduler'])
+                    print("✓ Scheduler state loaded")
+            except Exception as e:
+                print(f"Warning loading scheduler state: {e}")
+            try:
+                if 'scaler' in ckpt and ckpt['scaler'] is not None and scaler is not None:
+                    scaler.load_state_dict(ckpt['scaler'])
+                    print("✓ AMP scaler state loaded")
+            except Exception as e:
+                print(f"Warning loading scaler state: {e}")
+
+        # Epoch / best metrics
+        if ckpt is not None:
+            start_epoch = int(ckpt.get('epoch', -1)) + 1
+            initial_min_loss = ckpt.get('min_loss', None)
+            initial_best_acc = ckpt.get('best_acc', None)
+    else:
+        initial_min_loss = None
+        initial_best_acc = None
+
     # Train the model
     if args.train:
-        trainer.evaluate_validation_samples(local_rank, 0)
-        print("Starting training...")
+        if start_epoch == 0:
+            trainer.evaluate_validation_samples(local_rank, 0)
+        print(f"Starting training from epoch {start_epoch}...")
         results = trainer.fit(
             num_epochs=args.num_epochs,
             device=local_rank,
             early_stopping=args.early_stopping,
-            best='loss'  # Use loss for early stopping
+            best='loss',  # Use loss for early stopping
+            start_epoch=start_epoch,
+            initial_min_loss=initial_min_loss,
+            initial_best_acc=initial_best_acc,
         )
     
     # Run final evaluation on test set
     if local_rank == 0:
         print("Running final evaluation on test set...")
-        test_results = trainer.predict(test_loader, local_rank, load_best=True, compute_embeddings=True)
+        # Be robust to different LLMTrainer.predict signatures across versions
+        try:
+            test_results = trainer.predict(test_loader, local_rank, load_best=True, compute_embeddings=True)
+        except TypeError:
+            try:
+                test_results = trainer.predict(test_loader, local_rank, tokenizer=tokenizer)
+            except TypeError:
+                test_results = trainer.predict(test_loader, local_rank)
         
         # Save test results
         test_results_path = os.path.join(args.output_dir, f'{args.exp_name}_test_results.json')
@@ -830,6 +1066,14 @@ def run_training_with_error_handling():
         if dist.is_initialized():
             dist.destroy_process_group()
         raise
+    finally:
+        # Cleanly tear down the process group on normal completion
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception:
+                pass
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -868,5 +1112,3 @@ if __name__ == "__main__":
     print("=" * 80)
     
     run_training_with_error_handling()
-
-

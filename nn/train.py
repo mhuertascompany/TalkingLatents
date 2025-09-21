@@ -45,7 +45,7 @@ class Trainer(object):
     A class that encapsulates the training loop for a PyTorch model.
     """
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
-                 scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None, use_amp=False,
+                 scheduler=None, val_dataloader=None,   max_iter=-1, scaler=None, use_amp=False,
                   grad_clip=False, max_grad_norm=1, log_path=None, exp_name=None, plot_every=None,
                    cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
                    update_func=lambda x: x):
@@ -95,12 +95,13 @@ class Trainer(object):
         
         return None
     
-    def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
+    def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False,
+            initial_min_loss=None, initial_best_acc=None):
         """
         Fits the model for the given number of epochs.
         """
-        min_loss = np.inf
-        best_acc = 0
+        min_loss = float(initial_min_loss) if initial_min_loss is not None else np.inf
+        best_acc = float(initial_best_acc) if initial_best_acc is not None else 0.0
         train_loss, val_loss,  = [], []
         train_acc, val_acc = [], []
         lrs = []
@@ -154,11 +155,33 @@ class Trainer(object):
                         best_acc = current_objective
                         improved = True
                 
-                if improved:
+                if improved and (not dist.is_initialized() or dist.get_rank() == 0):
+                    # Save best composite checkpoint (rank 0 only)
                     model_name = f'{self.log_path}/{self.exp_name}.pth'
+                    resume_best = f'{self.log_path}/{self.exp_name}_resume_best.pth'
                     print(f"saving model at {model_name}...")
-                    torch.save(self.model.state_dict(), model_name)
-                    self.best_state_dict = self.model.state_dict()
+                    try:
+                        # atomic save: write temp then move
+                        tmp_model = model_name + '.tmp'
+                        torch.save(self.model.state_dict(), tmp_model)
+                        os.replace(tmp_model, model_name)
+                        self.best_state_dict = self.model.state_dict()
+                    except Exception as e:
+                        print(f"Warning saving state_dict only: {e}")
+                    try:
+                        tmp_best = resume_best + '.tmp'
+                        torch.save({
+                            'epoch': epoch,
+                            'model': self.model.state_dict(),
+                            'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
+                            'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
+                            'scaler': self.scaler.state_dict() if self.scaler is not None else None,
+                            'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
+                            'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
+                        }, tmp_best)
+                        os.replace(tmp_best, resume_best)
+                    except Exception as e:
+                        print(f"Warning saving best composite checkpoint: {e}")
                     # model_path, output_filename = save_compressed_checkpoint(
                     #                            self.model, model_name, res, use_zip=True )
                     epochs_without_improvement = 0
@@ -178,17 +201,20 @@ class Trainer(object):
                 
                 lrs.append(current_lr)
                 
-                output_filename = f'{self.log_path}/{self.exp_name}.json'
-                with open(output_filename, "w") as f:
-                    json.dump(res, f, indent=2)
-                print(f"saved results at {output_filename}")
+                if (not dist.is_initialized()) or dist.get_rank() == 0:
+                    output_filename = f'{self.log_path}/{self.exp_name}.json'
+                    tmp_json = output_filename + '.tmp'
+                    with open(tmp_json, "w") as f:
+                        json.dump(res, f, indent=2)
+                    os.replace(tmp_json, output_filename)
+                    print(f"saved results at {output_filename}")
                 
                 print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 
                         f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()},'\
                   f'Time: {time.time() - start_time:.2f}s, Total Time: {(time.time() - global_time)/3600} hr', flush=True)
-                if epoch % 10 == 0:
+                if ((not dist.is_initialized()) or dist.get_rank() == 0) and (epoch % 10 == 0):
                     print(os.system('nvidia-smi'))
 
                 if epochs_without_improvement == early_stopping:
@@ -197,6 +223,24 @@ class Trainer(object):
                 if time.time() - global_time > (23.83 * 3600):
                     print("time limit reached")
                     break 
+
+            # Always save last composite checkpoint to allow exact resume (rank 0 only)
+            if (not dist.is_initialized()) or dist.get_rank() == 0:
+                try:
+                    last_path = f'{self.log_path}/{self.exp_name}_resume_last.pth'
+                    tmp_last = last_path + '.tmp'
+                    torch.save({
+                        'epoch': epoch,
+                        'model': self.model.state_dict(),
+                        'optimizer': self.optimizer.state_dict() if self.optimizer is not None else None,
+                        'scheduler': self.scheduler.state_dict() if self.scheduler is not None else None,
+                        'scaler': self.scaler.state_dict() if self.scaler is not None else None,
+                        'min_loss': float(min_loss) if isinstance(min_loss, np.generic) else min_loss,
+                        'best_acc': float(best_acc) if isinstance(best_acc, np.generic) else best_acc,
+                    }, tmp_last)
+                    os.replace(tmp_last, last_path)
+                except Exception as e:
+                    print(f"Warning saving last composite checkpoint: {e}")
 
         return {"epochs":epochs, "train_loss": train_loss,
                  "val_loss": val_loss, "train_acc": train_acc,
@@ -277,7 +321,7 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item():.4f}")      
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         print("number of train_accs: ", all_accs, "total: ", total)
         return train_loss, all_accs/total
@@ -301,7 +345,7 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item():.4f}")
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         return val_loss, all_accs/total
 
@@ -481,7 +525,7 @@ class MaskedRegressorTrainer(Trainer):
             all_xs.append(x.cpu().numpy())
             all_decodes.append(decod_out.cpu().numpy())
             
-            if i > self.max_iter:
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, np.concatenate(all_features, axis=0),\
@@ -763,14 +807,16 @@ class LLMTrainer(Trainer):
         """
         Enhanced evaluation: first evaluate on sample questions, then run regular eval
         """
-        # Evaluate on validation samples first
-        if epoch % 1 == 0:  # Every epoch
-            self.evaluate_validation_samples(device, epoch)
+        # Evaluate on validation samples first (rank 0 only)
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
+            if epoch % 1 == 0:  # Every epoch
+                self.evaluate_validation_samples(device, epoch)
         
         # Then run regular evaluation
         return super().eval_epoch(device, epoch)
         
-    def evaluate_validation_samples(self, device, epoch, num_samples=3):
+    def evaluate_validation_samples(self, device, epoch, num_samples=3,
+                                    max_new_tokens=50, temperature=0.2, top_p=0.8):
         """
         Evaluate model on actual validation samples with both teacher-forcing and generation perplexity
         """
@@ -818,18 +864,18 @@ class LLMTrainer(Trainer):
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=100,
-                        temperature=0.7,
-                        top_p=0.9
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p
                     )
                 else:
                     generated_text, input_text, target_text, generation_log_probs = self.model.generate_response_from_batch(
                         batch_data=batch,
                         batch_idx=batch_idx,
                         tokenizer=tokenizer,
-                        max_new_tokens=100,
-                        temperature=0.7,
-                        top_p=0.9
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p
                     )
                 
                 # Calculate generation perplexity
@@ -1191,7 +1237,7 @@ class LLMTrainer(Trainer):
                     'recon': f'{avg_recon_loss:.4f}'
                 })
                 
-                if i > self.max_iter:
+                if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
                     break
         
         print(f"\n{'='*80}")

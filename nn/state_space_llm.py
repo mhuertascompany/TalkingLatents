@@ -8,19 +8,39 @@ from nn.llm import apply_rotary_emb, repeat_kv, LatentFeatureEncoder
 class LoRALayer(nn.Module):
     """LoRA (Low-Rank Adaptation) layer"""
 
-    def __init__(self, in_features: int, out_features: int, rank: int = 16, alpha: float = 16.0, dropout: float = 0.1,
-                 device=None):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int = 16,
+        alpha: float = 16.0,
+        dropout: float = 0.1,
+        device=None,
+        dtype=None,
+    ):
         super().__init__()
         self.rank = rank
         self.alpha = alpha
         self.scaling = alpha / rank
 
-        # LoRA matrices - initialize on correct device
-        self.lora_A = nn.Parameter(torch.randn(rank, in_features, device=device) * 0.01)
-        self.lora_B = nn.Parameter(torch.zeros(out_features, rank, device=device))
+        # LoRA matrices - initialize on correct device/dtype
+        self.lora_A = nn.Parameter(
+            torch.randn(rank, in_features, device=device, dtype=dtype) * 0.01
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(out_features, rank, device=device, dtype=dtype)
+        )
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
+        # Ensure LoRA params match input dtype/device (handles AMP/fp16)
+        if self.lora_A.dtype != x.dtype:
+            self.lora_A.data = self.lora_A.data.to(dtype=x.dtype)
+            self.lora_B.data = self.lora_B.data.to(dtype=x.dtype)
+        if self.lora_A.device != x.device:
+            self.lora_A.data = self.lora_A.data.to(device=x.device)
+            self.lora_B.data = self.lora_B.data.to(device=x.device)
+
         # x shape: (..., in_features)
         # LoRA forward: x @ A^T @ B^T * scaling
         lora_out = (x @ self.lora_A.T @ self.lora_B.T) * self.scaling
@@ -34,8 +54,10 @@ class LoRALinear(nn.Module):
         super().__init__()
         self.original_layer = original_layer
 
-        # Get device from original layer
-        device = next(original_layer.parameters()).device
+        # Get device and dtype from original layer
+        p = next(original_layer.parameters())
+        device = p.device
+        dtype = p.dtype
 
         # Handle different layer types
         if hasattr(original_layer, 'in_features') and hasattr(original_layer, 'out_features'):
@@ -52,8 +74,13 @@ class LoRALinear(nn.Module):
             out_features, in_features = weight.shape
 
         self.lora = LoRALayer(
-            in_features, out_features,
-            rank, alpha, dropout, device=device
+            in_features,
+            out_features,
+            rank,
+            alpha,
+            dropout,
+            device=device,
+            dtype=dtype,
         )
 
         # Freeze original layer

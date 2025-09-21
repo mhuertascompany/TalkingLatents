@@ -1,0 +1,21 @@
+{
+  "lora_params": {
+    "freeze_strategy": "lora",
+    "lora_start_epoch": 5,
+    "lora_lr_multiplier": 1.0,
+    "lora_rank": 8,
+    "lora_alpha": 8.0,
+    "lora_dropout": 0.0,
+    "lora_target_modules": [
+      "base_model.layers.*.attention.wq",
+      "base_model.layers.*.attention.wk",
+      "base_model.layers.*.attention.wv",
+      "base_model.layers.*.attention.wo",
+      "module.base_model.layers.*.attention.wq",
+      "module.base_model.layers.*.attention.wk",
+      "module.base_model.layers.*.attention.wv",
+      "module.base_model.layers.*.attention.wo"
+    ]
+  }
+}
+

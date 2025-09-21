@@ -586,38 +586,45 @@ def create_stellar_dataloaders(json_file: str,
     test_sampler = DistributedSampler(test_dataset, shuffle=False) if dist.is_initialized() else None
     
     # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
+    # Build DataLoader kwargs and only set prefetch/persistent when using workers
+    train_kwargs = dict(
         batch_size=batch_size,
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
-        drop_last=False
+        drop_last=False,
     )
+    if num_workers > 0:
+        train_kwargs.update(persistent_workers=True, prefetch_factor=2)
+    train_loader = DataLoader(train_dataset, **train_kwargs)
     
-    val_loader = DataLoader(
-        val_dataset,
+    val_kwargs = dict(
         batch_size=batch_size,
         sampler=val_sampler,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
         collate_fn=collate_fn,
-        drop_last=False
+        drop_last=False,
     )
+    if num_workers > 0:
+        val_kwargs.update(persistent_workers=True, prefetch_factor=2)
+    val_loader = DataLoader(val_dataset, **val_kwargs)
     
-    test_loader = DataLoader(
-        test_dataset,
+    test_kwargs = dict(
         batch_size=batch_size,
         sampler=test_sampler,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
         collate_fn=collate_fn,
-        drop_last=False
+        drop_last=False,
     )
+    if num_workers > 0:
+        test_kwargs.update(persistent_workers=True, prefetch_factor=2)
+    test_loader = DataLoader(test_dataset, **test_kwargs)
     
     return train_loader, val_loader, test_loader
 
