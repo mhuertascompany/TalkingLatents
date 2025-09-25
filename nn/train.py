@@ -747,6 +747,8 @@ class LLMTrainer(Trainer):
                 input_ids=input_ids,
                 input_spectra=input_spectra,
                 special_token_positions=special_token_positions,
+                question_start_indices=batch['question_start_indices'].to(device),
+                answer_start_indices=batch['answer_start_indices'].to(device),
             )
             
             logits = outputs['logits']
@@ -765,21 +767,12 @@ class LLMTrainer(Trainer):
 
             # Text -> latent auxiliary loss
             if self.lambda_text > 0:
-                try:
-                    # Hidden states
-                    h = outputs.get('h', None)
-                    q_st = batch['question_start_indices'].to(h.device)
-                    a_st = batch['answer_start_indices'].to(h.device)
-                    base = self.model.module if isinstance(self.model, (torch.nn.parallel.DistributedDataParallel, torch.nn.DataParallel)) else self.model
-                    pooled = base.pool_question_hidden(h, q_st, a_st)
-                    pred_latent = base.text_to_latent(pooled)
-                    lat_tgt2 = outputs.get('latent_target', None)
-                    if lat_tgt2 is not None:
-                        lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
-                        txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
-                        loss = loss + self.lambda_text * txt_loss
-                except Exception:
-                    pass
+                pred_latent = outputs.get('pred_latent_from_text', None)
+                lat_tgt2 = outputs.get('latent_target', None)
+                if pred_latent is not None and lat_tgt2 is not None:
+                    lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
+                    txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
+                    loss = loss + self.lambda_text * txt_loss
         
         # Backward pass with AMP
         if getattr(self, 'use_amp', False) and hasattr(self, 'scaler'):
@@ -826,6 +819,8 @@ class LLMTrainer(Trainer):
                     input_ids=input_ids,
                     input_spectra=input_spectra,
                     special_token_positions=special_token_positions,
+                    question_start_indices=batch['question_start_indices'].to(device),
+                    answer_start_indices=batch['answer_start_indices'].to(device),
                 )
                 
                 logits = outputs['logits']
@@ -838,20 +833,12 @@ class LLMTrainer(Trainer):
                         inv_loss = F.mse_loss(lat_rec, lat_tgt, reduction='mean')
                         loss = loss + self.lambda_feat * inv_loss
                 if self.lambda_text > 0:
-                    try:
-                        h = outputs.get('h', None)
-                        q_st = batch['question_start_indices'].to(h.device)
-                        a_st = batch['answer_start_indices'].to(h.device)
-                        base = self.model.module if isinstance(self.model, (torch.nn.parallel.DistributedDataParallel, torch.nn.DataParallel)) else self.model
-                        pooled = base.pool_question_hidden(h, q_st, a_st)
-                        pred_latent = base.text_to_latent(pooled)
-                        lat_tgt2 = outputs.get('latent_target', None)
-                        if lat_tgt2 is not None:
-                            lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
-                            txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
-                            loss = loss + self.lambda_text * txt_loss
-                    except Exception:
-                        pass
+                    pred_latent = outputs.get('pred_latent_from_text', None)
+                    lat_tgt2 = outputs.get('latent_target', None)
+                    if pred_latent is not None and lat_tgt2 is not None:
+                        lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
+                        txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
+                        loss = loss + self.lambda_text * txt_loss
                 if self.lambda_feat > 0:
                     lat_rec = outputs.get('latent_recon_from_tokens', None)
                     lat_tgt = outputs.get('latent_target', None)

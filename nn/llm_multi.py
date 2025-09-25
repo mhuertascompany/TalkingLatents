@@ -96,7 +96,9 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
                 input_ids: torch.Tensor,
                 input_spectra: torch.Tensor,
                 special_token_positions: torch.Tensor,
-                start_pos: int = 0) -> Dict[str, torch.Tensor]:
+                start_pos: int = 0,
+                question_start_indices: Optional[torch.Tensor] = None,
+                answer_start_indices: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         # Derive latent features
         if self.fm_model is not None:
             self.fm_model.eval()
@@ -112,10 +114,18 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         proj_param = next(self.projector.parameters())
         latent_features = latent_features.to(device=proj_param.device, dtype=proj_param.dtype)
 
-        return self._forward_no_cache(input_ids, latent_features, special_token_positions)
+        return self._forward_no_cache(
+            input_ids,
+            latent_features,
+            special_token_positions,
+            question_start_indices=question_start_indices,
+            answer_start_indices=answer_start_indices,
+        )
 
     def _forward_no_cache(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
-                          feature_start_indices) -> Dict[str, torch.Tensor]:
+                          feature_start_indices, *,
+                          question_start_indices: Optional[torch.Tensor] = None,
+                          answer_start_indices: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         bsz, seqlen = input_ids.shape
         device = input_ids.device
 
@@ -189,12 +199,23 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
 
         h = self.base_model.norm(h)
         logits = self.base_model.output(h).float()
+
+        # Optional text->latent prediction computed inside forward for DDP correctness
+        pred_latent_from_text = None
+        if question_start_indices is not None and answer_start_indices is not None:
+            try:
+                pooled = self.pool_question_hidden(h, question_start_indices, answer_start_indices)
+                pred_latent_from_text = self.text_to_latent(pooled)
+            except Exception:
+                pred_latent_from_text = None
+
         return {
             "logits": logits,
             "h": h,
             # For auxiliary invertibility loss (used only if trainer enables it)
             "latent_recon_from_tokens": latent_recon,
             "latent_target": latent_features,
+            "pred_latent_from_text": pred_latent_from_text,
         }
 
     def pool_question_hidden(self, h: torch.Tensor, q_start: torch.Tensor, a_start: torch.Tensor) -> torch.Tensor:
