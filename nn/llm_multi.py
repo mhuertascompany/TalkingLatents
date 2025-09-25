@@ -36,6 +36,26 @@ class SpectralTokensProjector(nn.Module):
         return x
 
 
+class InverseProjector(nn.Module):
+    """
+    Map K token embeddings (d_model each) back to the fm latent space (dim=latent_dim).
+    Minimal version: mean-pool over K, then a small MLP to latent_dim.
+    """
+
+    def __init__(self, d_model: int, latent_dim: int, hidden_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+
+    def forward(self, token_block: torch.Tensor) -> torch.Tensor:
+        # token_block: (B, K, d_model)
+        pooled = token_block.mean(dim=1)  # (B, d_model)
+        return self.mlp(pooled)           # (B, latent_dim)
+
+
 class MultimodalLlamaModelMultiTokens(nn.Module):
     """
     Multimodal wrapper that injects K spectral tokens into the LLaMA token sequence.
@@ -58,6 +78,18 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             d_model=self.embedding_dim,
             hidden_dim=hidden_dim,
             num_tokens=self.num_spectral_features,
+        )
+        # Minimal inverse mapping head (tokens -> latent)
+        self.inverse_projector = InverseProjector(
+            d_model=self.embedding_dim,
+            latent_dim=latent_dim,
+            hidden_dim=hidden_dim,
+        )
+        # Text -> latent head (pool question hidden states, then map to latent_dim)
+        self.text_to_latent = nn.Sequential(
+            nn.Linear(self.embedding_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, latent_dim),
         )
 
     def forward(self,
@@ -92,6 +124,8 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
 
         # Project spectral features to K token embeddings
         spec_tokens = self.projector(latent_features)  # (B, K, d_model)
+        # Optional: reconstruct latent from tokens for auxiliary loss
+        latent_recon = self.inverse_projector(spec_tokens)  # (B, latent_dim)
 
         # Normalize feature_start_indices to a 1D tensor of length bsz
         if feature_start_indices is None:
@@ -155,7 +189,34 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
 
         h = self.base_model.norm(h)
         logits = self.base_model.output(h).float()
-        return {"logits": logits, "h": h}
+        return {
+            "logits": logits,
+            "h": h,
+            # For auxiliary invertibility loss (used only if trainer enables it)
+            "latent_recon_from_tokens": latent_recon,
+            "latent_target": latent_features,
+        }
+
+    def pool_question_hidden(self, h: torch.Tensor, q_start: torch.Tensor, a_start: torch.Tensor) -> torch.Tensor:
+        """Mean-pool hidden states over [q_start, a_start) per sample.
+
+        Args:
+            h: [B, S, D]
+            q_start: [B] long tensor
+            a_start: [B] long tensor
+        Returns:
+            pooled: [B, D]
+        """
+        B, S, D = h.shape
+        pooled = []
+        for b in range(B):
+            qs = int(q_start[b].item())
+            as_ = int(a_start[b].item())
+            qs = max(0, min(qs, S-1))
+            as_ = max(qs+1, min(as_, S))  # ensure at least one token
+            seg = h[b, qs:as_, :]
+            pooled.append(seg.mean(dim=0))
+        return torch.stack(pooled, dim=0)
 
     def _attn_no_cache(self, x: torch.Tensor, freqs_cis: torch.Tensor,
                         mask: Optional[torch.Tensor], attention_layer) -> torch.Tensor:

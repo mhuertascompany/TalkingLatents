@@ -131,6 +131,9 @@ def main():
         scaler=scaler,
         use_amp=args.use_amp,
         max_grad_norm=args.max_grad_norm,
+        # Optional auxiliary invertibility loss weight (default 0 if arg missing)
+        lambda_feat=getattr(args, 'lambda_feat', 0.0),
+        lambda_text=getattr(args, 'lambda_text', 0.0),
     )
     trainer.scheduler = scheduler
     trainer.tokenizer = tokenizer

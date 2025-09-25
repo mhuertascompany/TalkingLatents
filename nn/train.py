@@ -542,6 +542,10 @@ class LLMTrainer(Trainer):
         self.gamma = gamma
         self.max_chunk_size = max_chunk_size
         self.tokenizer = tokenizer
+        # Optional auxiliary loss weight: invert tokens -> latent
+        self.lambda_feat = kwargs.get('lambda_feat', 0.0)
+        # Optional auxiliary loss weight: text -> latent
+        self.lambda_text = kwargs.get('lambda_text', 0.0)
         self.freeze_strategy = lora_params['freeze_strategy']
         self.lora_rank = lora_params['lora_rank']
         self.lora_alpha = lora_params['lora_alpha']
@@ -750,6 +754,33 @@ class LLMTrainer(Trainer):
             
             # Compute loss
             loss = self.get_loss(logits, target_ids)
+            # Add optional invertibility loss if available
+            if self.lambda_feat > 0:
+                lat_rec = outputs.get('latent_recon_from_tokens', None)
+                lat_tgt = outputs.get('latent_target', None)
+                if lat_rec is not None and lat_tgt is not None:
+                    # Ensure matching dtype/device
+                    lat_tgt = lat_tgt.to(device=lat_rec.device, dtype=lat_rec.dtype)
+                    inv_loss = F.mse_loss(lat_rec, lat_tgt, reduction='mean')
+                    loss = loss + self.lambda_feat * inv_loss
+
+            # Text -> latent auxiliary loss
+            if self.lambda_text > 0:
+                try:
+                    # Hidden states
+                    h = outputs.get('h', None)
+                    q_st = batch['question_start_indices'].to(h.device)
+                    a_st = batch['answer_start_indices'].to(h.device)
+                    base = self.model.module if isinstance(self.model, (torch.nn.parallel.DistributedDataParallel, torch.nn.DataParallel)) else self.model
+                    pooled = base.pool_question_hidden(h, q_st, a_st)
+                    pred_latent = base.text_to_latent(pooled)
+                    lat_tgt2 = outputs.get('latent_target', None)
+                    if lat_tgt2 is not None:
+                        lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
+                        txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
+                        loss = loss + self.lambda_text * txt_loss
+                except Exception:
+                    pass
         
         # Backward pass with AMP
         if getattr(self, 'use_amp', False) and hasattr(self, 'scaler'):
@@ -800,6 +831,35 @@ class LLMTrainer(Trainer):
                 
                 logits = outputs['logits']
                 loss = self.get_loss(logits, target_ids)
+                if self.lambda_feat > 0:
+                    lat_rec = outputs.get('latent_recon_from_tokens', None)
+                    lat_tgt = outputs.get('latent_target', None)
+                    if lat_rec is not None and lat_tgt is not None:
+                        lat_tgt = lat_tgt.to(device=lat_rec.device, dtype=lat_rec.dtype)
+                        inv_loss = F.mse_loss(lat_rec, lat_tgt, reduction='mean')
+                        loss = loss + self.lambda_feat * inv_loss
+                if self.lambda_text > 0:
+                    try:
+                        h = outputs.get('h', None)
+                        q_st = batch['question_start_indices'].to(h.device)
+                        a_st = batch['answer_start_indices'].to(h.device)
+                        base = self.model.module if isinstance(self.model, (torch.nn.parallel.DistributedDataParallel, torch.nn.DataParallel)) else self.model
+                        pooled = base.pool_question_hidden(h, q_st, a_st)
+                        pred_latent = base.text_to_latent(pooled)
+                        lat_tgt2 = outputs.get('latent_target', None)
+                        if lat_tgt2 is not None:
+                            lat_tgt2 = lat_tgt2.to(device=pred_latent.device, dtype=pred_latent.dtype)
+                            txt_loss = F.mse_loss(pred_latent, lat_tgt2, reduction='mean')
+                            loss = loss + self.lambda_text * txt_loss
+                    except Exception:
+                        pass
+                if self.lambda_feat > 0:
+                    lat_rec = outputs.get('latent_recon_from_tokens', None)
+                    lat_tgt = outputs.get('latent_target', None)
+                    if lat_rec is not None and lat_tgt is not None:
+                        lat_tgt = lat_tgt.to(device=lat_rec.device, dtype=lat_rec.dtype)
+                        inv_loss = F.mse_loss(lat_rec, lat_tgt, reduction='mean')
+                        loss = loss + self.lambda_feat * inv_loss
         
         return loss, 0, outputs['h']
     
@@ -894,7 +954,26 @@ class LLMTrainer(Trainer):
                 print(f"Teacher-Forcing Perplexity: {tf_perplexity:.2f}")
                 print(f"Generation Perplexity: {gen_perplexity:.2f}")
                 print(f"Generated {len(generation_log_probs)} tokens")
-                
+
+                # Attempt retrieval parsing/metrics if target has retrieval format
+                retrieval_ok = None
+                try:
+                    from util.retrieval import parse_neighbors_text, parse_order_text
+                    t_neighbors = parse_neighbors_text(target_text)
+                    t_order = parse_order_text(target_text)
+                    if t_neighbors is not None:
+                        p_neighbors = parse_neighbors_text(generated_text)
+                        if p_neighbors is not None:
+                            L = len(t_neighbors)
+                            retrieval_ok = int(p_neighbors[:L] == t_neighbors)
+                    elif t_order is not None:
+                        p_order = parse_order_text(generated_text)
+                        if p_order is not None:
+                            L = len(t_order)
+                            retrieval_ok = int(p_order[:L] == t_order)
+                except Exception:
+                    pass
+
                 # Store results
                 sample_result = {
                     'obsid': obsid,
@@ -903,6 +982,7 @@ class LLMTrainer(Trainer):
                     'generated_answer': generated_text,
                     'teacher_forcing_perplexity': tf_perplexity,
                     'generation_perplexity': gen_perplexity,
+                    'retrieval_ok': retrieval_ok,
                     'num_generated_tokens': len(generation_log_probs)
                 }
                 epoch_results['samples'].append(sample_result)
@@ -934,6 +1014,12 @@ class LLMTrainer(Trainer):
         print(f"Avg Generation Perplexity: {epoch_results['avg_generation_perplexity']:.2f}")
         print(f"Valid TF Samples: {valid_tf_count}/{sample_count}")
         print(f"Valid Gen Samples: {valid_gen_count}/{sample_count}")
+        # Summarize retrieval exact-match if any
+        if any(s.get('retrieval_ok') is not None for s in epoch_results['samples']):
+            total_ret = sum(1 for s in epoch_results['samples'] if s.get('retrieval_ok') is not None)
+            correct_ret = sum(int(s.get('retrieval_ok') or 0) for s in epoch_results['samples'])
+            rate = correct_ret / max(1, total_ret)
+            print(f"Retrieval exact-match on samples: {correct_ret}/{total_ret} ({100*rate:.1f}%)")
         print(f"{'='*60}")
         
         # Store results

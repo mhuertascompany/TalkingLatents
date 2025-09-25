@@ -305,6 +305,10 @@ def parse_args():
                        help='Early stopping patience')
     parser.add_argument('--max_iter', type=int, default=-1,
                        help='Maximum training iterations per epoch (-1 for no cap)')
+    parser.add_argument('--lambda_feat', type=float, default=0.0,
+                       help='Auxiliary weight for tokens->latent invertibility loss')
+    parser.add_argument('--lambda_text', type=float, default=0.0,
+                       help='Auxiliary weight for text->latent regression loss')
 
     parser.add_argument('--use_amp', action='store_true', default=False,
                        help='Use Automatic Mixed Precision training')
