@@ -34,6 +34,5 @@ data/stellar_descriptions_combined.json
 data/stellar_descriptions_questions_geometry.json
 data/stellar_descriptions_questions_retrieval.json
 data/stellar_descriptions_questions_properties.json
-data/stellar_descriptions_questions_combined.json
 data/combined_tmp.json
 data/features.npy
