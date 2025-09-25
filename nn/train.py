@@ -536,16 +536,15 @@ class MaskedRegressorTrainer(Trainer):
 class LLMTrainer(Trainer):
 
     def __init__(self, lora_params, alpha=1, beta=1, gamma=1, max_chunk_size=128, tokenizer=None, **kwargs):
+        # Pop custom kwargs before calling base Trainer.__init__
+        self.lambda_feat = kwargs.pop('lambda_feat', 0.0)
+        self.lambda_text = kwargs.pop('lambda_text', 0.0)
         super(LLMTrainer, self).__init__(**kwargs)
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
         self.max_chunk_size = max_chunk_size
         self.tokenizer = tokenizer
-        # Optional auxiliary loss weight: invert tokens -> latent
-        self.lambda_feat = kwargs.get('lambda_feat', 0.0)
-        # Optional auxiliary loss weight: text -> latent
-        self.lambda_text = kwargs.get('lambda_text', 0.0)
         self.freeze_strategy = lora_params['freeze_strategy']
         self.lora_rank = lora_params['lora_rank']
         self.lora_alpha = lora_params['lora_alpha']
