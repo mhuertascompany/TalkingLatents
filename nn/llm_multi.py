@@ -66,13 +66,15 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
     """
 
     def __init__(self, base_model, fm_model, latent_dim, hidden_dim, num_spectral_features: int = 8,
-                 use_checkpoint: bool = True):
+                 use_checkpoint: bool = True, physics_dim: int = 3, neighbor_temperature: float = 1.0):
         super().__init__()
         self.base_model = base_model
         self.fm_model = fm_model
         self.embedding_dim = base_model.params.dim
         self.num_spectral_features = int(num_spectral_features)
         self.use_checkpoint = use_checkpoint
+        self.physics_dim = int(max(0, physics_dim))
+        self.neighbor_temperature = float(neighbor_temperature)
         self.projector = SpectralTokensProjector(
             latent_dim=latent_dim,
             d_model=self.embedding_dim,
@@ -91,6 +93,13 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, latent_dim),
         )
+        self.latent_to_physics = None
+        if self.physics_dim > 0:
+            self.latent_to_physics = nn.Sequential(
+                nn.Linear(latent_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, self.physics_dim),
+            )
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -98,7 +107,9 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
                 special_token_positions: torch.Tensor,
                 start_pos: int = 0,
                 question_start_indices: Optional[torch.Tensor] = None,
-                answer_start_indices: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                answer_start_indices: Optional[torch.Tensor] = None,
+                neighbor_latents: Optional[torch.Tensor] = None,
+                neighbor_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         # Derive latent features
         if self.fm_model is not None:
             self.fm_model.eval()
@@ -120,12 +131,16 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             special_token_positions,
             question_start_indices=question_start_indices,
             answer_start_indices=answer_start_indices,
+            neighbor_latents=neighbor_latents,
+            neighbor_mask=neighbor_mask,
         )
 
     def _forward_no_cache(self, input_ids: torch.Tensor, latent_features: torch.Tensor,
                           feature_start_indices, *,
                           question_start_indices: Optional[torch.Tensor] = None,
-                          answer_start_indices: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                          answer_start_indices: Optional[torch.Tensor] = None,
+                          neighbor_latents: Optional[torch.Tensor] = None,
+                          neighbor_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         bsz, seqlen = input_ids.shape
         device = input_ids.device
 
@@ -209,6 +224,23 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             except Exception:
                 pred_latent_from_text = None
 
+        physics_pred = None
+        if pred_latent_from_text is not None and self.latent_to_physics is not None:
+            physics_pred = self.latent_to_physics(pred_latent_from_text)
+
+        neighbor_logits = None
+        if pred_latent_from_text is not None and neighbor_latents is not None and neighbor_latents.numel() > 0:
+            neighbor_latents = neighbor_latents.to(device=latent_features.device, dtype=latent_features.dtype)
+            query = F.normalize(pred_latent_from_text, dim=-1)
+            neigh = F.normalize(neighbor_latents, dim=-1)
+            neighbor_logits = torch.matmul(query.unsqueeze(1), neigh.transpose(1, 2)).squeeze(1)
+            if neighbor_mask is not None:
+                mask = neighbor_mask.to(device=neighbor_logits.device, dtype=neighbor_logits.dtype)
+                neighbor_logits = neighbor_logits.masked_fill(mask < 0.5, float('-inf'))
+                neighbor_mask = mask
+            if self.neighbor_temperature > 0:
+                neighbor_logits = neighbor_logits / self.neighbor_temperature
+
         return {
             "logits": logits,
             "h": h,
@@ -216,6 +248,9 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             "latent_recon_from_tokens": latent_recon,
             "latent_target": latent_features,
             "pred_latent_from_text": pred_latent_from_text,
+            "physics_pred": physics_pred,
+            "neighbor_logits": neighbor_logits,
+            "neighbor_mask": neighbor_mask,
         }
 
     def pool_question_hidden(self, h: torch.Tensor, q_start: torch.Tensor, a_start: torch.Tensor) -> torch.Tensor:
@@ -315,9 +350,22 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         # Ensure features fed to projector match projector dtype/device
         proj_param = next(self.projector.parameters())
         features_vec = input_spectra.view(prompt.size(0), -1).to(device=proj_param.device, dtype=proj_param.dtype)
+        neighbor_latents = None
+        neighbor_mask = None
+        if 'neighbor_latents' in batch_data and batch_data['neighbor_latents'].numel() > 0:
+            neighbor_latents = batch_data['neighbor_latents'][batch_idx:batch_idx+1].to(device)
+            neighbor_mask = batch_data.get('neighbor_mask')
+            if neighbor_mask is not None and neighbor_mask.numel() > 0:
+                neighbor_mask = neighbor_mask[batch_idx:batch_idx+1].to(device)
 
         for _ in range(max_new_tokens):
-            out = self._forward_no_cache(prompt, features_vec, feature_start_idx)
+            out = self._forward_no_cache(
+                prompt,
+                features_vec,
+                feature_start_idx,
+                neighbor_latents=neighbor_latents,
+                neighbor_mask=neighbor_mask,
+            )
             logits = out['logits'][:, -1, :].squeeze(0)
             # Log prob of chosen token
             if temperature > 0:

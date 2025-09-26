@@ -279,6 +279,17 @@ def parse_args():
                        help='Common projection space dimension')
     parser.add_argument('--num_spectral_features', type=int, default=1,
                        help='Number of spectral features to integrate into LLM')
+    parser.add_argument('--num_neighbor_samples', type=int, default=0,
+                       help='Number of nearest neighbours to include per sample for topology supervision')
+    parser.add_argument('--neighbor_metric', type=str, default='euclidean',
+                       help='Distance metric for neighbour search (scikit-learn syntax)')
+    parser.add_argument('--neighbor_cache', type=str, default=None,
+                       help='Optional path to save/load precomputed neighbour graph (npz)')
+    parser.add_argument('--physics_keys', nargs='*', default=['Teff', 'logg', 'FeH'],
+                       help='Physical property keys used for auxiliary regression')
+    parser.set_defaults(normalize_physics=True)
+    parser.add_argument('--disable_physics_normalization', action='store_false', dest='normalize_physics',
+                       help='Disable normalization of physical property targets')
     parser.add_argument('--latent_ids', type=list, nargs='*', default=['Teff', 'logg', 'FeH'],
                        help='List of latent variable IDs to include (e.g., --latent_ids mass age metallicity)')
     parser.add_argument('--max_seq_length', type=int, default=128,
@@ -309,6 +320,10 @@ def parse_args():
                        help='Auxiliary weight for tokens->latent invertibility loss')
     parser.add_argument('--lambda_text', type=float, default=0.0,
                        help='Auxiliary weight for text->latent regression loss')
+    parser.add_argument('--lambda_retrieval', type=float, default=0.0,
+                       help='Auxiliary weight for neighbour retrieval loss')
+    parser.add_argument('--lambda_physics', type=float, default=0.0,
+                       help='Auxiliary weight for physical property regression loss')
 
     parser.add_argument('--use_amp', action='store_true', default=False,
                        help='Use Automatic Mixed Precision training')
@@ -392,6 +407,11 @@ def create_datasets_and_loaders(args, device):
                                             cache_dir=cache_dir,
                                             tokenizer_path=tokenizer_path,  
                                             max_length=args.max_seq_length,
+                                            num_neighbor_samples=args.num_neighbor_samples,
+                                            neighbor_metric=args.neighbor_metric,
+                                            neighbor_cache_path=args.neighbor_cache,
+                                            physics_keys=tuple(args.physics_keys),
+                                            normalize_physics=args.normalize_physics,
                                             batch_size=args.batch_size,
                                             num_workers=args.num_workers,)
 

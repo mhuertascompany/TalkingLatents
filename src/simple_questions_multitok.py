@@ -41,6 +41,7 @@ def build_model_multitok(args, device):
         latent_dim=args.spectral_embedding_dim,
         hidden_dim=args.hidden_dim,
         num_spectral_features=args.num_spectral_features,
+        physics_dim=len(getattr(args, 'physics_keys', []) or []),
     ).to(device)
     # Keep projector in float32 for numeric stability with GradScaler
     # (base model runs in fp16/bf16; features are cast to projector dtype inside model)
@@ -134,6 +135,8 @@ def main():
         # Optional auxiliary invertibility loss weight (default 0 if arg missing)
         lambda_feat=getattr(args, 'lambda_feat', 0.0),
         lambda_text=getattr(args, 'lambda_text', 0.0),
+        lambda_retrieval=getattr(args, 'lambda_retrieval', 0.0),
+        lambda_physics=getattr(args, 'lambda_physics', 0.0),
     )
     trainer.scheduler = scheduler
     trainer.tokenizer = tokenizer
