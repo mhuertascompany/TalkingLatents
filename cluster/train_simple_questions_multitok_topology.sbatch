@@ -33,7 +33,7 @@ LLM_PATH=${LLM_PATH:-/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-L
 # Training knobs (override at submission time)
 OUTDIR=${OUTDIR:-logs/train_topology}
 EXP=${EXP:-llm_multitok_topology}
-EPOCHS=${EPOCHS:-5}
+EPOCHS=${EPOCHS:-10}
 BATCH=${BATCH:-2}              # per-GPU
 MAXLEN=${MAXLEN:-128}
 WORKERS=${WORKERS:-8}
