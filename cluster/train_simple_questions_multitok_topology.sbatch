@@ -45,6 +45,7 @@ LAMBDA_FEAT=${LAMBDA_FEAT:-0.05}
 LAMBDA_TEXT=${LAMBDA_TEXT:-0.05}
 LAMBDA_RETR=${LAMBDA_RETR:-0.5}
 LAMBDA_PHYS=${LAMBDA_PHYS:-0.2}
+MAX_ITER=${MAX_ITER:-200}
 
 mkdir -p "${OUTDIR}"
 
@@ -76,4 +77,4 @@ srun --kill-on-bad-exit=1 \
     --lambda_text "${LAMBDA_TEXT}" \
     --lambda_retrieval "${LAMBDA_RETR}" \
     --lambda_physics "${LAMBDA_PHYS}" \
-    --max_iter -1
+    --max_iter "${MAX_ITER}"
