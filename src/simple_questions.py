@@ -79,6 +79,11 @@ def setup():
         flush=True,
     )
 
+    if gpus_per_node == 0:
+        if rank == 0:
+            print("No CUDA devices detected; running in CPU-only mode without distributed init.")
+        return 0, 1, 0
+
     # Initialize process group (works for world_size==1 as well)
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, init_method="env://")
@@ -290,6 +295,8 @@ def parse_args():
     parser.set_defaults(normalize_physics=True)
     parser.add_argument('--disable_physics_normalization', action='store_false', dest='normalize_physics',
                        help='Disable normalization of physical property targets')
+    parser.add_argument('--use_dummy_llm', action='store_true',
+                       help='Use a tiny dummy language model for local smoke tests')
     parser.add_argument('--latent_ids', type=list, nargs='*', default=['Teff', 'logg', 'FeH'],
                        help='List of latent variable IDs to include (e.g., --latent_ids mass age metallicity)')
     parser.add_argument('--max_seq_length', type=int, default=128,
