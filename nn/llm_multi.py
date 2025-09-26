@@ -297,7 +297,13 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(attention_layer.head_dim)
         if mask is not None:
-            scores = scores + mask
+            mask_to_add = mask
+            if mask_to_add.dim() == 2:
+                mask_to_add = mask_to_add.unsqueeze(0).unsqueeze(0)
+            # Trim or broadcast to match actual sequence dims
+            if mask_to_add.size(-2) != scores.size(-2) or mask_to_add.size(-1) != scores.size(-1):
+                mask_to_add = mask_to_add[..., :scores.size(-2), :scores.size(-1)]
+            scores = scores + mask_to_add.to(dtype=scores.dtype)
         probs = F.softmax(scores.float(), dim=-1).type_as(xq)
         out = torch.matmul(probs, values)
         out = out.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
