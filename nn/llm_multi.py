@@ -196,6 +196,7 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=device, dtype=h.dtype)
             mask = torch.triu(mask, diagonal=1)
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,S,S]
 
         def layer_block(h_in, layer):
             # Attention
