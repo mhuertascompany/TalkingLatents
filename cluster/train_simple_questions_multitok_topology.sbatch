@@ -25,7 +25,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"max_split_size_mb:64"
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 
 # Data/model paths (override with --export=VAR=VALUE)
-JSON_FILE=${JSON_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_topology_questions.json}
+JSON_FILE=${JSON_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_descriptions_questions_short.json}
 FEATURES_FILE=${FEATURES_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/features.npy}
 NEIGHBOR_CACHE=${NEIGHBOR_CACHE:-/lustre/fswork/projects/rech/oxl/utl47bv/cache/topology_neighbors.npz}
 LLM_PATH=${LLM_PATH:-/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original}
@@ -45,7 +45,7 @@ LAMBDA_FEAT=${LAMBDA_FEAT:-0.00}
 LAMBDA_TEXT=${LAMBDA_TEXT:-0.00}
 LAMBDA_RETR=${LAMBDA_RETR:-0.0}
 LAMBDA_PHYS=${LAMBDA_PHYS:-0.0}
-MAX_ITER=${MAX_ITER:-200}
+MAX_ITER=${MAX_ITER:--1}
 
 mkdir -p "${OUTDIR}"
 
