@@ -191,12 +191,8 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         freqs = torch.outer(t, freqs)
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
 
-        # Causal mask
+        # Mask handled inside _attn_no_cache to accommodate dynamic lengths
         mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=device, dtype=h.dtype)
-            mask = torch.triu(mask, diagonal=1)
-            mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,S,S]
 
         def layer_block(h_in, layer):
             # Attention
@@ -296,14 +292,21 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(attention_layer.head_dim)
-        if mask is not None:
+        if mask is None:
+            qlen, klen = scores.size(-2), scores.size(-1)
+            causal = torch.zeros((qlen, klen), device=scores.device, dtype=scores.dtype)
+            upper = torch.triu(torch.ones((qlen, klen), device=scores.device, dtype=torch.bool), diagonal=1)
+            causal = causal.masked_fill(upper, float('-inf'))
+            mask_to_add = causal.unsqueeze(0).unsqueeze(0)
+        else:
             mask_to_add = mask
             if mask_to_add.dim() == 2:
                 mask_to_add = mask_to_add.unsqueeze(0).unsqueeze(0)
-            # Trim or broadcast to match actual sequence dims
-            if mask_to_add.size(-2) != scores.size(-2) or mask_to_add.size(-1) != scores.size(-1):
-                mask_to_add = mask_to_add[..., :scores.size(-2), :scores.size(-1)]
-            scores = scores + mask_to_add.to(dtype=scores.dtype)
+            mask_to_add = mask_to_add[..., :scores.size(-2), :scores.size(-1)]
+            if mask_to_add.size(1) == 1 and scores.size(1) > 1:
+                mask_to_add = mask_to_add.expand(-1, scores.size(1), -1, -1)
+            mask_to_add = mask_to_add.to(dtype=scores.dtype, device=scores.device)
+        scores = scores + mask_to_add
         probs = F.softmax(scores.float(), dim=-1).type_as(xq)
         out = torch.matmul(probs, values)
         out = out.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
