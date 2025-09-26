@@ -232,9 +232,9 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
             neigh = F.normalize(neighbor_latents, dim=-1)
             neighbor_logits = torch.matmul(query.unsqueeze(1), neigh.transpose(1, 2)).squeeze(1)
             if neighbor_mask is not None:
-                mask = neighbor_mask.to(device=neighbor_logits.device, dtype=neighbor_logits.dtype)
-                neighbor_logits = neighbor_logits.masked_fill(mask < 0.5, float('-inf'))
-                neighbor_mask = mask
+                neighbor_mask_float = neighbor_mask.to(device=neighbor_logits.device, dtype=neighbor_logits.dtype)
+                neighbor_logits = neighbor_logits.masked_fill(neighbor_mask_float < 0.5, float('-inf'))
+                neighbor_mask = neighbor_mask_float
             if self.neighbor_temperature > 0:
                 neighbor_logits = neighbor_logits / self.neighbor_temperature
 
@@ -292,21 +292,15 @@ class MultimodalLlamaModelMultiTokens(nn.Module):
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(attention_layer.head_dim)
+        qlen, klen = scores.size(-2), scores.size(-1)
         if mask is None:
-            qlen, klen = scores.size(-2), scores.size(-1)
-            causal = torch.zeros((qlen, klen), device=scores.device, dtype=scores.dtype)
-            upper = torch.triu(torch.ones((qlen, klen), device=scores.device, dtype=torch.bool), diagonal=1)
-            causal = causal.masked_fill(upper, float('-inf'))
-            mask_to_add = causal.unsqueeze(0).unsqueeze(0)
+            causal = torch.full((qlen, klen), float('-inf'), device=scores.device, dtype=scores.dtype)
+            causal = torch.triu(causal, diagonal=1)
+            scores = scores + causal
         else:
-            mask_to_add = mask
-            if mask_to_add.dim() == 2:
-                mask_to_add = mask_to_add.unsqueeze(0).unsqueeze(0)
-            mask_to_add = mask_to_add[..., :scores.size(-2), :scores.size(-1)]
-            if mask_to_add.size(1) == 1 and scores.size(1) > 1:
-                mask_to_add = mask_to_add.expand(-1, scores.size(1), -1, -1)
-            mask_to_add = mask_to_add.to(dtype=scores.dtype, device=scores.device)
-        scores = scores + mask_to_add
+            mask_to_add = mask.to(dtype=scores.dtype, device=scores.device)
+            mask_to_add = mask_to_add[..., :qlen, :klen]
+            scores = scores + mask_to_add
         probs = F.softmax(scores.float(), dim=-1).type_as(xq)
         out = torch.matmul(probs, values)
         out = out.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
