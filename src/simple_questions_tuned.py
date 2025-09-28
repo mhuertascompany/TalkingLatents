@@ -13,6 +13,8 @@ from torch.cuda.amp import GradScaler
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
+import os
+os.system('pip install tiktoken fairscale fire blobfile')
 from src.simple_questions import (
     setup,
     create_datasets_and_loaders,
@@ -29,6 +31,8 @@ def parse_args():
     p.add_argument('--features_file', type=str, default=None)
     p.add_argument('--output_dir', type=str, default='logs')
     p.add_argument('--exp_name', type=str, default='interpert_tuned')
+    p.add_argument('--num_workers', type=int, default=4,
+                       help='Number of dataloader workers')
     # Core model args (delegated to imported functions via env/config)
     p.add_argument('--max_seq_length', type=int, default=128)
     # Training
@@ -104,6 +108,7 @@ def create_optimizer_and_scheduler_tuned(model, args, train_loader):
 
 def main():
     args = parse_args()
+    print(args)
     date = __import__('datetime').datetime.now().strftime('%Y-%m-%d-%H-%M')
     args.output_dir = os.path.join(args.output_dir, date)
     os.makedirs(args.output_dir, exist_ok=True)

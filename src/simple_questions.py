@@ -313,6 +313,17 @@ def parse_args():
                        help='AMP optimization level')
     parser.add_argument('--loss_scale', type=float, default=None,
                        help='Static loss scaling factor (None for dynamic)')
+
+    parser.add_argument('--mode', type=str, choices=['single_star', 'two_star', 'combined'], 
+                       default='combined', help='Training mode: single_star, two_star, or combined')
+    
+    parser.add_argument('--switch_epoch', type=int, default=7,
+                       help='Epoch to switch from single_star to two_star in combined mode')
+    
+    parser.add_argument('--comparative_json_file', type=str, 
+                       default='/data/TalkingLatents/data/dataset/comparative_dataset.json',
+                       help='Path to comparative questions JSON file (used in two_star mode)')
+    
     
     # Memory optimization
     parser.add_argument('--gradient_checkpointing', action='store_true', default=True,

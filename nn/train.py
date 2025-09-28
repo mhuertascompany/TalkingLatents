@@ -16,6 +16,8 @@ from pathlib import Path
 import io
 import zipfile
 import gc
+import inspect
+
 
 from nn.state_space_llm import apply_lora_to_model
 from fairscale.nn.model_parallel.layers import RowParallelLinear, ColumnParallelLinear
@@ -535,13 +537,14 @@ class MaskedRegressorTrainer(Trainer):
 
 class LLMTrainer(Trainer):
 
-    def __init__(self, lora_params, alpha=1, beta=1, gamma=1, max_chunk_size=128, tokenizer=None, **kwargs):
+    def __init__(self, lora_params, alpha=1, beta=1, gamma=1, max_chunk_size=128, tokenizer=None, mode="single_star", **kwargs):
         super(LLMTrainer, self).__init__(**kwargs)
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
         self.max_chunk_size = max_chunk_size
         self.tokenizer = tokenizer
+        self.mode = mode  # "single_star" or "two_star"
         self.freeze_strategy = lora_params['freeze_strategy']
         self.lora_rank = lora_params['lora_rank']
         self.lora_alpha = lora_params['lora_alpha']
@@ -628,7 +631,7 @@ class LLMTrainer(Trainer):
             for name, param in self.model.named_parameters():
                 if 'base_model' not in name and 'fm_model' not in name:
                     param.requires_grad = True
-                    # print(f"  ✓ Unfrozen: {name}")
+                    print(f"  ✓ Unfrozen: {name}")
                 else:
                     param.requires_grad = False
 
@@ -641,10 +644,10 @@ class LLMTrainer(Trainer):
             for name, param in self.model.named_parameters():
                 if 'base_model' not in name and 'fm_model' not in name:
                     param.requires_grad = True
-                    # print(f"  ✓ Unfrozen (multimodal): {name}")
+                    print(f"  ✓ Unfrozen : {name}")
                 elif 'lora' in name:
                     param.requires_grad = True
-                    # print(f"  ✓ Unfrozen (LoRA): {name}")
+                    print(f"  ✓ Unfrozen (LoRA): {name}")
                 else:
                     param.requires_grad = False
 
@@ -656,7 +659,7 @@ class LLMTrainer(Trainer):
         self.current_freeze_state = strategy
 
         # Verify critical components are trainable
-        critical_components = ['feature_encoder', 'evolution_model']
+        critical_components = ['projector', 'projector_a', 'projector_b']
         for component in critical_components:
             component_params = [p for name, p in self.model.named_parameters()
                                 if component in name and p.requires_grad]
@@ -684,6 +687,21 @@ class LLMTrainer(Trainer):
         print(f"Total trainable parameters: {trainable_count:,}")
     
     def train_epoch(self, device, epoch):
+        # Handle mode switching for combined mode
+        if hasattr(self, 'combined_mode') and self.combined_mode:
+            if epoch >= self.switch_epoch and self.mode == "single_star":
+                print(f"\n*** SWITCHING MODE FROM single_star TO two_star AT EPOCH {epoch} ***")
+                # Switch to two_star mode
+                self.mode = "two_star"
+                self.train_dl = self.two_star_loaders['train']
+                self.val_dl = self.two_star_loaders['val']
+                # Update model mode
+                if hasattr(self.model, 'module'):
+                    self.model.module.mode = "two_star"
+                else:
+                    self.model.mode = "two_star"
+                print(f"Switched to two_star mode with {len(self.train_dl)} batches per epoch")
+        
         self._apply_freeze_strategy(self.freeze_strategy)
         return super().train_epoch(device, epoch)
 
@@ -709,13 +727,86 @@ class LLMTrainer(Trainer):
         active_logits = flat_logits[flat_mask]
         active_labels = flat_labels[flat_mask]
         
-        loss = F.cross_entropy(active_logits, active_labels, reduction='mean')
+        # For two_star mode, weight first 2 tokens more heavily
+        if hasattr(self, 'mode') and self.mode == 'two_star':
+            # Create weights for all active tokens
+            weights = torch.ones_like(active_labels, dtype=torch.float, device=logits.device)
+            
+            # Find positions of active tokens for each sample in batch
+            batch_size, seq_len = active_mask.shape
+            weight_multiplier = 3.0  # Make first 2 tokens 3x more important
+            
+            # Count active tokens per sample to identify first 2 tokens
+            for batch_idx in range(batch_size):
+                sample_active_mask = active_mask[batch_idx]
+                if sample_active_mask.any():
+                    # Get indices of active tokens for this sample
+                    active_indices = torch.nonzero(sample_active_mask, as_tuple=False).squeeze(-1)
+                    if len(active_indices) >= 2:
+                        # Weight the first 2 active tokens more heavily
+                        first_two_global_indices = batch_idx * seq_len + active_indices[:2]
+                        # Find these indices in the flattened active_labels
+                        flat_active_indices = torch.nonzero(flat_mask, as_tuple=False).squeeze(-1)
+                        for global_idx in first_two_global_indices:
+                            local_idx = (flat_active_indices == global_idx).nonzero(as_tuple=False)
+                            if len(local_idx) > 0:
+                                weights[local_idx[0]] = weight_multiplier
+            
+            # Compute weighted cross entropy loss
+            loss = F.cross_entropy(active_logits, active_labels, reduction='none')
+            loss = (loss * weights).mean()
+        else:
+            # Standard cross entropy loss for non-two_star modes
+            loss = F.cross_entropy(active_logits, active_labels, reduction='mean')
         
         # Print diagnostic info
         # print(f"Active tokens: {active_mask.sum().item()}/{active_mask.numel()} "
         #     f"({100*active_mask.sum().item()/active_mask.numel():.1f}%)")
         
         return loss
+    
+    def get_logits(self, batch, device, val=False):
+        # DEBUG: Check input tensors
+        input_ids = batch['input_ids'].to(device)
+        target_ids = batch['target_ids'].to(device)
+
+        
+        # Handle different data structures based on mode
+        if self.mode == "two_star":
+            star_a_spectra = batch['masked_spectra_a'].to(device)
+            star_b_spectra = batch['masked_spectra_b'].to(device)
+            star_a_indices = batch['star_a_feature_indices'].to(device)
+            star_b_indices = batch['star_b_feature_indices'].to(device)
+
+        else:
+            special_token_positions = batch['feature_start_indices'].to(device)
+            input_spectra = batch['masked_spectra'].to(device) 
+        
+        # Forward pass with memory tracking and AMP
+        mem_before_forward = torch.cuda.memory_allocated(device) / 1024**3
+        with autocast(enabled=getattr(self, 'use_amp', False)):
+            # Conditional no_grad
+            cm = torch.no_grad() if val else torch.enable_grad()
+            with cm:
+                if self.mode == "two_star":
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        input_spectra=None,
+                        special_token_positions=None,
+                        star_a_spectra=star_a_spectra,
+                        star_b_spectra=star_b_spectra,
+                        star_a_indices=star_a_indices,
+                        star_b_indices=star_b_indices,
+                    )
+                else:
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        input_spectra=input_spectra,
+                        special_token_positions=special_token_positions,
+                    )
+
+        return outputs
+
 
     def train_batch(self, batch, batch_idx, device):
         """Training step with AMP and detailed memory debugging"""
@@ -723,33 +814,15 @@ class LLMTrainer(Trainer):
         # Memory before forward pass
         torch.cuda.empty_cache()
         gc.collect()
-    
-        # DEBUG: Check input tensors
-        input_ids = batch['input_ids'].to(device)
-        input_spectra = batch['masked_spectra'].to(device) 
-        special_token_positions = batch['feature_start_indices'].to(device)
-        target_ids = batch['target_ids'].to(device)
 
-        tot_length = batch['input_lengths'] + batch['target_lengths']
+
+
+        outputs = self.get_logits(batch, device, val=False)
         
-        # Clear gradients
-        self.optimizer.zero_grad()
+        target_ids = batch['target_ids'].to(device)
+        # Compute loss
+        loss = self.get_loss(outputs['logits'], target_ids)
         
-        # Forward pass with memory tracking and AMP
-        mem_before_forward = torch.cuda.memory_allocated(device) / 1024**3
-        
-        # WRAP forward pass with autocast
-        with autocast(enabled=getattr(self, 'use_amp', False)):
-            outputs = self.model(
-                input_ids=input_ids,
-                input_spectra=input_spectra,
-                special_token_positions=special_token_positions,
-            )
-            
-            logits = outputs['logits']
-            
-            # Compute loss
-            loss = self.get_loss(logits, target_ids)
         
         # Backward pass with AMP
         if getattr(self, 'use_amp', False) and hasattr(self, 'scaler'):
@@ -783,23 +856,11 @@ class LLMTrainer(Trainer):
 
     def eval_batch(self, batch, batch_idx, device):
         """Validation step with AMP"""
-        
-        input_ids = batch['input_ids'].to(device)
-        input_spectra = batch['masked_spectra'].to(device) 
-        special_token_positions = batch['feature_start_indices'].to(device)
+        outputs = self.get_logits(batch, device, val=True)
+
         target_ids = batch['target_ids'].to(device)
         
-        with torch.no_grad():
-            # WRAP with autocast for validation too
-            with autocast(enabled=getattr(self, 'use_amp', False)):
-                outputs = self.model(
-                    input_ids=input_ids,
-                    input_spectra=input_spectra,
-                    special_token_positions=special_token_positions,
-                )
-                
-                logits = outputs['logits']
-                loss = self.get_loss(logits, target_ids)
+        loss = self.get_loss(outputs['logits'], target_ids)
         
         return loss, 0, outputs['h']
     
@@ -973,17 +1034,32 @@ class LLMTrainer(Trainer):
         # Extract batch data
         input_ids = batch['input_ids'][batch_idx:batch_idx+1].to(device)
         target_ids = batch['target_ids'][batch_idx:batch_idx+1].to(device)
-        input_spectra = batch['masked_spectra'][batch_idx:batch_idx+1].to(device)
-        feature_start_idx = batch['feature_start_indices'][batch_idx].item()
+
+        # WRAP with autocast for validation too
+        with autocast(enabled=getattr(self, 'use_amp', False)):
+            if self.mode == "two_star":
+                star_a_spectra = batch['masked_spectra_a'][batch_idx:batch_idx+1].to(device)
+                star_b_spectra = batch['masked_spectra_b'][batch_idx:batch_idx+1].to(device)
+                star_a_indices = batch['star_a_feature_indices'][batch_idx:batch_idx+1].to(device)
+                star_b_indices = batch['star_b_feature_indices'][batch_idx:batch_idx+1].to(device)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    input_spectra=None,
+                    special_token_positions=None,
+                    star_a_spectra=star_a_spectra,
+                    star_b_spectra=star_b_spectra,
+                    star_a_indices=star_a_indices,
+                    star_b_indices=star_b_indices,
+                    )
+            else:
+                special_token_positions = batch['feature_start_indices'].to(device)
+                input_spectra = batch['masked_spectra'].to(device) 
+                outputs = self.model(
+                    input_ids=input_ids,
+                    input_spectra=input_spectra,
+                    special_token_positions=special_token_positions,
+                )
         
-        # Forward pass with full sequence (including target)
-        special_token_positions = torch.tensor([feature_start_idx], device=device)
-        
-        outputs = self.model(
-            input_ids=input_ids,
-            input_spectra=input_spectra,
-            special_token_positions=special_token_positions,
-        )
         
         logits = outputs['logits']
         
