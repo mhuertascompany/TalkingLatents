@@ -42,7 +42,7 @@ WORKERS=8
 LR=5e-5
 WD=1e-3
 MODE=${MODE:-combined}
-SWITCH=${SWITCH:-7}
+SWITCH=${SWITCH:-0}
 TOKS=${TOKS:-8}
 
 # Auto-detect the latest composite checkpoint (resume_last preferred)
