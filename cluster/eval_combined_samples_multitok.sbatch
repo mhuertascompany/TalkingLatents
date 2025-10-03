@@ -30,8 +30,8 @@ LLM_PATH=/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/
 OUTDIR=${OUTDIR:-logs/eval_multitok_combined}
 EXP=${EXP:-eval_multitok_combined}
 TOTAL_SAMPLES=${TOTAL_SAMPLES:-12}
-SIMPLE_SAMPLES=${SIMPLE_SAMPLES:-6}
-COMP_SAMPLES=${COMP_SAMPLES:-0}
+SIMPLE_SAMPLES=${SIMPLE_SAMPLES:-0}
+COMP_SAMPLES=${COMP_SAMPLES:-6}
 TOKS=${TOKS:-8}
 MAXLEN=${MAXLEN:-128}
 TOKENS=${TOKENS:-150}
@@ -43,6 +43,11 @@ LLM_PREC=${LLM_PREC:-fp16}
 mkdir -p "${OUTDIR}"
 
 RESUME=${RESUME:-$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_best.pth 2>/dev/null | head -1 || true)}
+DEFAULT_TRAIN_CACHE_ROOT=""
+if [[ -n "${RESUME}" ]]; then
+  DEFAULT_TRAIN_CACHE_ROOT=$(dirname "${RESUME}")
+fi
+TRAIN_CACHE_ROOT=${TRAIN_CACHE_ROOT:-${DEFAULT_TRAIN_CACHE_ROOT}}
 
 ARGS=(
   --llm_path "${LLM_PATH}"
@@ -62,6 +67,10 @@ ARGS=(
   --random_seed "${SEED}"
   --llm_precision "${LLM_PREC}"
 )
+
+if [[ -n "${TRAIN_CACHE_ROOT}" ]]; then
+  ARGS+=(--train_cache_root "${TRAIN_CACHE_ROOT}")
+fi
 
 if [[ -n "${RESUME}" && -f "${RESUME}" ]]; then
   echo "Using resume checkpoint: ${RESUME}"

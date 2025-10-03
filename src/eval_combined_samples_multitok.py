@@ -48,7 +48,8 @@ def parse_args():
     parser.add_argument('--llm_root', type=str, default=os.environ.get('LLM_ROOT', '/data/.llama'))
     parser.add_argument('--llm_model', type=str, default='Llama3.1-8B')
     parser.add_argument('--llm_path', type=str, default=None)
-    parser.add_argument('--resume_path', type=str, default=None)
+    parser.add_argument('--resume_path', type=str, default=None,
+                        help='Composite checkpoint from training run (used to locate cached splits)')
     parser.add_argument('--weights', type=str, default=None)
     parser.add_argument('--llm_precision', type=str, default='fp16', choices=['fp32', 'fp16', 'bf16'])
     parser.add_argument('--spectral_embedding_dim', type=int, default=2048)
@@ -72,6 +73,10 @@ def parse_args():
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--train_cache_root', type=str, default=None,
+                        help='Directory containing cache_single/cache_two from training run')
+    parser.add_argument('--allow_new_splits', action='store_true',
+                        help='Regenerate splits if cached indices are missing')
     return parser.parse_args()
 
 
@@ -211,6 +216,40 @@ def main():
     _, tokenizer_path = get_model_path(args)
     transforms = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
 
+    train_cache_root = args.train_cache_root
+    if train_cache_root is None and args.resume_path:
+        train_cache_root = os.path.dirname(args.resume_path)
+
+    single_cache_dir = None
+    comp_cache_dir = None
+    if train_cache_root:
+        candidate_single = os.path.join(train_cache_root, 'cache_single')
+        candidate_comp = os.path.join(train_cache_root, 'cache_two')
+        if os.path.isdir(candidate_single) and os.path.isdir(candidate_comp):
+            single_cache_dir = candidate_single
+            comp_cache_dir = candidate_comp
+        else:
+            if not args.allow_new_splits:
+                missing_paths = []
+                if not os.path.isdir(candidate_single):
+                    missing_paths.append(candidate_single)
+                if not os.path.isdir(candidate_comp):
+                    missing_paths.append(candidate_comp)
+                raise FileNotFoundError(
+                    "Cached split directories not found. Pass --allow_new_splits to regenerate or "
+                    "provide --train_cache_root pointing to the training run.")
+            else:
+                print("[WARN] Cached split directories not found; generating fresh splits in output dir.")
+
+    if single_cache_dir is None:
+        single_cache_dir = os.path.join(args.output_dir, 'cache_single')
+        if train_cache_root is None and not args.allow_new_splits:
+            print("[WARN] No training cache provided; generating fresh single-star splits in output dir.")
+    if comp_cache_dir is None:
+        comp_cache_dir = os.path.join(args.output_dir, 'cache_two')
+        if train_cache_root is None and not args.allow_new_splits:
+            print("[WARN] No training cache provided; generating fresh comparative splits in output dir.")
+
     single_train, single_val, single_test = create_stellar_dataloaders(
         json_file=args.json_file,
         features_array=spectral_features,
@@ -220,7 +259,7 @@ def main():
         test_ratio=args.test_ratio,
         random_state=args.random_seed,
         num_spectral_features=args.num_spectral_features,
-        cache_dir=os.path.join(args.output_dir, 'cache_single'),
+        cache_dir=single_cache_dir,
         tokenizer_path=tokenizer_path,
         max_length=args.max_seq_length,
         batch_size=args.batch_size,
@@ -235,7 +274,7 @@ def main():
         test_ratio=args.test_ratio,
         random_state=args.random_seed,
         num_workers=args.num_workers,
-        cache_dir=os.path.join(args.output_dir, 'cache_two'),
+        cache_dir=comp_cache_dir,
         tokenizer_path=tokenizer_path,
         max_length=args.max_seq_length,
         num_stellar_features=args.num_spectral_features,
