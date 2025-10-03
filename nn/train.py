@@ -365,10 +365,17 @@ class Trainer(object):
             return
         self.model.eval()
         losses = []
+        sample_examples = []
         with torch.no_grad():
             for i, batch in enumerate(self.val_dl):
+                mode = batch.get('mode', self.mode)
+                self._set_active_mode(mode)
                 loss, _, _ = self.eval_batch(batch, i + epoch * len(self.val_dl), device)
                 losses.append(loss.item())
+                if len(losses) <= 3:
+                    sample = self._collect_validation_sample(batch, device)
+                    if sample:
+                        sample_examples.append(sample)
                 if i >= 9:
                     break
 
@@ -386,12 +393,56 @@ class Trainer(object):
                     'epoch': epoch,
                     'iteration': iteration,
                     'avg_val_loss': avg_loss,
-                    'num_batches': len(losses)
+                    'num_batches': len(losses),
+                    'samples': sample_examples
                 }, fh, indent=2)
 
         if dist.is_initialized():
             torch.cuda.synchronize()
         self.model.train()
+
+    def _collect_validation_sample(self, batch: Dict[str, Any], device) -> Optional[Dict[str, Any]]:
+        try:
+            tokenizer = getattr(self, 'tokenizer', None)
+            model = self.model.module if hasattr(self.model, 'module') else self.model
+            batch_idx = 0
+            generated_text, input_text, target_text, _ = model.generate_response_from_batch(
+                batch_data=batch,
+                batch_idx=batch_idx,
+                tokenizer=tokenizer,
+                max_new_tokens=50,
+                temperature=0.2,
+                top_p=0.8,
+            )
+
+            if not input_text:
+                input_text = batch.get('input_texts', [''])[batch_idx] if batch.get('input_texts') else ''
+                if not input_text:
+                    input_text = batch.get('question_texts', [''])[batch_idx] if batch.get('question_texts') else ''
+
+            if not target_text:
+                target_text = batch.get('target_texts', [''])[batch_idx] if batch.get('target_texts') else ''
+
+            obsid_key = 'obsids' if 'obsids' in batch else 'obsid'
+            obsid_val = None
+            if obsid_key in batch:
+                obs_entry = batch[obsid_key][batch_idx] if isinstance(batch[obsid_key], (list, tuple)) else batch[obsid_key]
+                if isinstance(obs_entry, torch.Tensor):
+                    obsid_val = obs_entry.item() if obs_entry.numel() == 1 else obs_entry.tolist()
+                else:
+                    obsid_val = obs_entry
+
+            sample = {
+                'mode': batch.get('mode', getattr(model, 'mode', 'single_star')),
+                'obsid': obsid_val,
+                'question': input_text,
+                'true_answer': target_text,
+                'generated_answer': generated_text,
+            }
+            return sample
+        except Exception as err:
+            print(f"Warning: failed to collect validation sample ({err})")
+            return None
 
     def eval_batch(self, batch, batch_idx, device):
         pass
