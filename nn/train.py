@@ -49,8 +49,8 @@ class Trainer(object):
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
                  scheduler=None, val_dataloader=None,   max_iter=-1, scaler=None, use_amp=False,
                   grad_clip=False, max_grad_norm=1, log_path=None, exp_name=None, plot_every=None,
-                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
-                   update_func=lambda x: x):
+                  cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
+                  update_func=lambda x: x, validation_interval=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -79,6 +79,7 @@ class Trainer(object):
         self.num_quantiles = num_quantiles
         self.update_func = update_func
         self.epoch = 0
+        self.validation_interval = validation_interval
         # if log_path is not None:
         #     self.logger =SummaryWriter(f'{self.log_path}/exp{self.exp_num}')
         #     # print(f"logger path: {self.log_path}/exp{self.exp_num}")
@@ -314,7 +315,10 @@ class Trainer(object):
         train_acc = 0
         total = 0
         all_accs = torch.zeros(self.output_dim, device=device)
-        pbar = tqdm(self.train_dl)
+        total_batches = len(self.train_dl)
+        if self.max_iter is not None and self.max_iter >= 0:
+            total_batches = min(total_batches, self.max_iter + 1)
+        pbar = tqdm(self.train_dl, total=total_batches)
         for i, batch in enumerate(pbar):
             if self.optimizer is not None:
                 self.optimizer.zero_grad()
@@ -323,8 +327,11 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item():.4f}")      
-            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i >= self.max_iter):
                 break
+
+            if self.validation_interval and (i + 1) % self.validation_interval == 0:
+                self._run_mid_epoch_validation(epoch, i + 1, device)
         print("number of train_accs: ", all_accs, "total: ", total)
         return train_loss, all_accs/total
     
@@ -340,16 +347,51 @@ class Trainer(object):
         val_acc = 0
         total = 0
         all_accs = torch.zeros(self.output_dim, device=device)
-        pbar = tqdm(self.val_dl)
+        total_batches = len(self.val_dl)
+        if self.max_iter is not None and self.max_iter >= 0:
+            total_batches = min(total_batches, self.max_iter + 1)
+        pbar = tqdm(self.val_dl, total=total_batches)
         for i,batch in enumerate(pbar):
             loss, acc, y = self.eval_batch(batch, i + epoch * len(self.val_dl), device)
             val_loss.append(loss.item())
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item():.4f}")
-            if (self.max_iter is not None) and (self.max_iter >= 0) and (i > self.max_iter):
+            if (self.max_iter is not None) and (self.max_iter >= 0) and (i >= self.max_iter):
                 break
-        return val_loss, all_accs/total
+
+    def _run_mid_epoch_validation(self, epoch: int, iteration: int, device):
+        if self.val_dl is None or self.validation_interval is None:
+            return
+        self.model.eval()
+        losses = []
+        with torch.no_grad():
+            for i, batch in enumerate(self.val_dl):
+                loss, _, _ = self.eval_batch(batch, i + epoch * len(self.val_dl), device)
+                losses.append(loss.item())
+                if i >= 9:
+                    break
+
+        if not losses:
+            return
+
+        avg_loss = float(np.mean(losses))
+        if self.log_path and self.exp_name:
+            interim_path = os.path.join(
+                self.log_path,
+                f"{self.exp_name}_midval_epoch{epoch}_iter{iteration}.json"
+            )
+            with open(interim_path, 'w') as fh:
+                json.dump({
+                    'epoch': epoch,
+                    'iteration': iteration,
+                    'avg_val_loss': avg_loss,
+                    'num_batches': len(losses)
+                }, fh, indent=2)
+
+        if dist.is_initialized():
+            torch.cuda.synchronize()
+        self.model.train()
 
     def eval_batch(self, batch, batch_idx, device):
         pass

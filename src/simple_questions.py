@@ -363,6 +363,8 @@ def parse_args():
                        help='Root directory used to cache persistent dataset splits')
     parser.add_argument('--allow_new_splits', action='store_true', default=False,
                        help='Allow generation of new dataset splits when no cache is available')
+    parser.add_argument('--validation_interval', type=int, default=None,
+                       help='Run mid-epoch validation every N training iterations')
 
     # Resume options
     parser.add_argument('--resume_path', type=str, default=None,

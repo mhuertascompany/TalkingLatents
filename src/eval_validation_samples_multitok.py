@@ -68,6 +68,8 @@ def parse_args():
                    help='Root directory containing cached dataset splits')
     p.add_argument('--allow_new_splits', action='store_true',
                    help='Allow generating new splits if cache is missing')
+    p.add_argument('--mode', type=str, default='single_star', choices=['single_star', 'two_star'],
+                   help='Select which mode to evaluate when invoked mid-training')
     return p.parse_args()
 
 

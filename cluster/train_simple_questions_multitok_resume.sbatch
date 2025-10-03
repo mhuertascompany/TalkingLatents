@@ -41,12 +41,13 @@ MAXLEN=128
 WORKERS=8
 LR=5e-5
 WD=1e-3
-MAX_ITER=${MAX_ITER:-200} # set to -1 for full epoch
+MAX_ITER=${MAX_ITER:--1} # set to -1 for full epoch
+VALIDATION_INTERVAL=${VALIDATION_INTERVAL:-500}
 MODE=${MODE:-combined}
 SWITCH=${SWITCH:-0}
 TOKS=${TOKS:-8}
 SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
-ALLOW_SPLIT_REGEN=${ALLOW_SPLIT_REGEN:-1}
+ALLOW_SPLIT_REGEN=${ALLOW_SPLIT_REGEN:-0}
 
 # Auto-detect the latest composite checkpoint (resume_last preferred)
 RESUME=${RESUME:-$(ls -t ${OUTDIR}/*/${EXP}_resume_last.pth 2>/dev/null | head -1 || true)}
@@ -75,6 +76,7 @@ COMMON_ARGS=(
   --weight_decay "${WD}"
   --max_seq_length "${MAXLEN}"
   --max_iter "${MAX_ITER}"
+  --validation_interval "${VALIDATION_INTERVAL}"
   --num_workers "${WORKERS}"
   --num_spectral_features "${TOKS}"
   --llm_precision fp16

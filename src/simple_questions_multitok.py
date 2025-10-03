@@ -344,6 +344,7 @@ def main():
         use_amp=args.use_amp,
         max_grad_norm=args.max_grad_norm,
         mode=initial_mode,
+        validation_interval=args.validation_interval,
     )
     
     # Store combined mode information in trainer for mode-aware batching
@@ -359,16 +360,84 @@ def main():
     trainer.scheduler = scheduler
     trainer.tokenizer = tokenizer
 
+    # Resume handling (model + optimizer + scheduler + scaler + epoch)
+    start_epoch = 0
+    initial_min_loss = None
+    initial_best_acc = None
+
+    def _load_state_dict(target, state):
+        if state is None:
+            return
+        clean_state = {}
+        for k, v in state.items():
+            nk = k[7:] if k.startswith('module.') else k
+            clean_state[nk] = v
+        target.load_state_dict(clean_state, strict=False)
+
+    if getattr(args, 'resume_path', None) and os.path.exists(args.resume_path):
+        print(f"Resuming from checkpoint: {args.resume_path}")
+        try:
+            ckpt = torch.load(args.resume_path, map_location='cpu')
+        except Exception as err:
+            print(f"Failed to load resume checkpoint ({err}); proceeding without exact resume")
+            ckpt = None
+        if ckpt is not None:
+            model_state = ckpt.get('model', ckpt)
+            if isinstance(model_state, dict) and 'state_dict' in model_state:
+                model_state = model_state['state_dict']
+            _load_state_dict(model.module if isinstance(model, DDP) else model, model_state)
+
+            opt_state = ckpt.get('optimizer')
+            if opt_state and optimizer is not None:
+                try:
+                    optimizer.load_state_dict(opt_state)
+                    print("✓ Optimizer state loaded")
+                except Exception as err:
+                    print(f"Warning: optimizer state not loaded ({err})")
+
+            sched_state = ckpt.get('scheduler')
+            if sched_state and scheduler is not None:
+                try:
+                    scheduler.load_state_dict(sched_state)
+                    print("✓ Scheduler state loaded")
+                except Exception as err:
+                    print(f"Warning: scheduler state not loaded ({err})")
+
+            scaler_state = ckpt.get('scaler')
+            if scaler_state and scaler is not None:
+                try:
+                    scaler.load_state_dict(scaler_state)
+                    print("✓ AMP scaler state loaded")
+                except Exception as err:
+                    print(f"Warning: scaler state not loaded ({err})")
+
+            start_epoch = int(ckpt.get('epoch', -1)) + 1
+            initial_min_loss = ckpt.get('min_loss')
+            initial_best_acc = ckpt.get('best_acc')
+    elif getattr(args, 'checkpoint_dir', None):
+        ckpt_path = os.path.join(args.checkpoint_dir, f"{args.exp_name}.pth")
+        if os.path.isfile(ckpt_path):
+            print(f"Warm-starting weights from {ckpt_path}")
+            state = torch.load(ckpt_path, map_location='cpu')
+            _load_state_dict(model.module if isinstance(model, DDP) else model, state)
+        else:
+            print(f"Checkpoint directory provided but file not found: {ckpt_path}")
+
     if local_rank == 0:
         save_config(args, args.output_dir)
 
     if args.train:
-        trainer.evaluate_validation_samples(local_rank, 0)
+        if start_epoch == 0:
+            trainer.evaluate_validation_samples(local_rank, 0)
+        print(f"Starting training from epoch {start_epoch}...")
         _ = trainer.fit(
             num_epochs=args.num_epochs,
             device=local_rank,
             early_stopping=args.early_stopping,
-            best='loss'
+            best='loss',
+            start_epoch=start_epoch,
+            initial_min_loss=initial_min_loss,
+            initial_best_acc=initial_best_acc,
         )
 
 
