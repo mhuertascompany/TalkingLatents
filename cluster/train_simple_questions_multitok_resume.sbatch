@@ -41,9 +41,12 @@ MAXLEN=128
 WORKERS=8
 LR=5e-5
 WD=1e-3
+MAX_ITER=${MAX_ITER:-200}. # set to -1 for full epoch
 MODE=${MODE:-combined}
 SWITCH=${SWITCH:-0}
 TOKS=${TOKS:-8}
+SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
+ALLOW_SPLIT_REGEN=${ALLOW_SPLIT_REGEN:-1}
 
 # Auto-detect the latest composite checkpoint (resume_last preferred)
 RESUME=${RESUME:-$(ls -t ${OUTDIR}/*/${EXP}_resume_last.pth 2>/dev/null | head -1 || true)}
@@ -71,12 +74,18 @@ COMMON_ARGS=(
   --learning_rate "${LR}"
   --weight_decay "${WD}"
   --max_seq_length "${MAXLEN}"
+  --max_iter "${MAX_ITER}"
   --num_workers "${WORKERS}"
   --num_spectral_features "${TOKS}"
   --llm_precision fp16
   --use_amp
   --gradient_checkpointing
+  --split_cache_root "${SPLIT_CACHE_ROOT}"
 )
+
+if [[ "${ALLOW_SPLIT_REGEN}" == "1" ]]; then
+  COMMON_ARGS+=(--allow_new_splits)
+fi
 
 # If we found a composite resume checkpoint, resume exactly; else warm-start from last weights
 if [[ -n "${RESUME}" && -f "${RESUME}" ]]; then

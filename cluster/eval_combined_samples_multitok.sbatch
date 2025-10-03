@@ -30,7 +30,7 @@ LLM_PATH=/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/
 OUTDIR=${OUTDIR:-logs/eval_multitok_combined}
 EXP=${EXP:-eval_multitok_combined}
 TOTAL_SAMPLES=${TOTAL_SAMPLES:-12}
-SIMPLE_SAMPLES=${SIMPLE_SAMPLES:-0}
+SIMPLE_SAMPLES=${SIMPLE_SAMPLES:-6}
 COMP_SAMPLES=${COMP_SAMPLES:-6}
 TOKS=${TOKS:-8}
 MAXLEN=${MAXLEN:-128}
@@ -39,16 +39,12 @@ TEMP=${TEMP:-0.2}
 TOPP=${TOPP:-0.8}
 SEED=${SEED:-42}
 LLM_PREC=${LLM_PREC:-fp16}
+SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
+ALLOW_SPLIT_REGEN=${ALLOW_SPLIT_REGEN:-0}
 
 mkdir -p "${OUTDIR}"
 
 RESUME=${RESUME:-$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_best.pth 2>/dev/null | head -1 || true)}
-DEFAULT_TRAIN_CACHE_ROOT=""
-if [[ -n "${RESUME}" ]]; then
-  DEFAULT_TRAIN_CACHE_ROOT=$(dirname "${RESUME}")
-fi
-TRAIN_CACHE_ROOT=${TRAIN_CACHE_ROOT:-${DEFAULT_TRAIN_CACHE_ROOT}}
-
 ARGS=(
   --llm_path "${LLM_PATH}"
   --json_file "${JSON_FILE}"
@@ -66,10 +62,11 @@ ARGS=(
   --top_p "${TOPP}"
   --random_seed "${SEED}"
   --llm_precision "${LLM_PREC}"
+  --split_cache_root "${SPLIT_CACHE_ROOT}"
 )
 
-if [[ -n "${TRAIN_CACHE_ROOT}" ]]; then
-  ARGS+=(--train_cache_root "${TRAIN_CACHE_ROOT}")
+if [[ "${ALLOW_SPLIT_REGEN}" == "1" ]]; then
+  ARGS+=(--allow_new_splits)
 fi
 
 if [[ -n "${RESUME}" && -f "${RESUME}" ]]; then

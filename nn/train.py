@@ -553,6 +553,13 @@ class LLMTrainer(Trainer):
         self.lora_start_epoch = lora_params['lora_start_epoch']
         self.lora_modules = None
         self._apply_freeze_strategy(self.freeze_strategy)
+        self._set_active_mode(self.mode)
+
+    def _set_active_mode(self, mode: str):
+        self.mode = mode
+        target_model = self.model.module if hasattr(self.model, 'module') else self.model
+        if hasattr(target_model, 'mode'):
+            target_model.mode = mode
 
     def _apply_lora(self):
         """Apply LoRA to the model - fixed version"""
@@ -687,21 +694,16 @@ class LLMTrainer(Trainer):
         print(f"Total trainable parameters: {trainable_count:,}")
     
     def train_epoch(self, device, epoch):
-        # Handle mode switching for combined mode
         if hasattr(self, 'combined_mode') and self.combined_mode:
-            if epoch >= self.switch_epoch and self.mode == "single_star":
-                print(f"\n*** SWITCHING MODE FROM single_star TO two_star AT EPOCH {epoch} ***")
-                # Switch to two_star mode
-                self.mode = "two_star"
-                self.train_dl = self.two_star_loaders['train']
-                self.val_dl = self.two_star_loaders['val']
-                # Update model mode
-                if hasattr(self.model, 'module'):
-                    self.model.module.mode = "two_star"
-                else:
-                    self.model.mode = "two_star"
-                print(f"Switched to two_star mode with {len(self.train_dl)} batches per epoch")
-        
+            if hasattr(self, 'mixed_train_loader'):
+                self.mixed_train_loader.set_epoch(epoch)
+                self.train_dl = self.mixed_train_loader
+            if hasattr(self, 'mixed_val_loader'):
+                self.mixed_val_loader.set_epoch(epoch)
+                self.val_dl = self.mixed_val_loader
+            # Ensure we start each epoch in single-star mode for consistency
+            self._set_active_mode('single_star')
+
         self._apply_freeze_strategy(self.freeze_strategy)
         return super().train_epoch(device, epoch)
 
@@ -810,6 +812,9 @@ class LLMTrainer(Trainer):
 
     def train_batch(self, batch, batch_idx, device):
         """Training step with AMP and detailed memory debugging"""
+
+        batch_mode = batch.get('mode', self.mode)
+        self._set_active_mode(batch_mode)
         
         # Memory before forward pass
         torch.cuda.empty_cache()
@@ -856,6 +861,8 @@ class LLMTrainer(Trainer):
 
     def eval_batch(self, batch, batch_idx, device):
         """Validation step with AMP"""
+        batch_mode = batch.get('mode', self.mode)
+        self._set_active_mode(batch_mode)
         outputs = self.get_logits(batch, device, val=True)
 
         target_ids = batch['target_ids'].to(device)
@@ -912,7 +919,10 @@ class LLMTrainer(Trainer):
                     batch = next(val_iter)
                 except StopIteration:
                     break
-                
+
+                batch_mode = batch.get('mode', self.mode)
+                self._set_active_mode(batch_mode)
+
                 batch_idx = 0
                 obsid = batch['obsids'][batch_idx] if 'obsids' in batch else "Unknown"
                 
@@ -964,7 +974,8 @@ class LLMTrainer(Trainer):
                     'generated_answer': generated_text,
                     'teacher_forcing_perplexity': tf_perplexity,
                     'generation_perplexity': gen_perplexity,
-                    'num_generated_tokens': len(generation_log_probs)
+                    'num_generated_tokens': len(generation_log_probs),
+                    'mode': batch_mode
                 }
                 epoch_results['samples'].append(sample_result)
                 

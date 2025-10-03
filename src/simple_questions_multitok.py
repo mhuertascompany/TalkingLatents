@@ -2,8 +2,11 @@ import os
 import sys
 import json
 import argparse
+from pathlib import Path
+from typing import Dict
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
@@ -28,35 +31,46 @@ import numpy as np
 import torch.distributed as dist
 
 
+class InterleavedDataLoader:
+    """Alternate batches from multiple dataloaders while tagging their mode."""
+
+    def __init__(self, loaders: Dict[str, DataLoader], mode_order=None):
+        self.loaders = loaders
+        self.mode_order = mode_order or list(loaders.keys())
+
+    def __len__(self):
+        return sum(len(loader) for loader in self.loaders.values())
+
+    def set_epoch(self, epoch: int):
+        for loader in self.loaders.values():
+            sampler = getattr(loader, 'sampler', None)
+            if sampler is not None and hasattr(sampler, 'set_epoch'):
+                sampler.set_epoch(epoch)
+
+    def __iter__(self):
+        iterators = {mode: iter(loader) for mode, loader in self.loaders.items()}
+        finished = {mode: False for mode in self.mode_order}
+
+        while not all(finished.values()):
+            for mode in self.mode_order:
+                if finished[mode]:
+                    continue
+                try:
+                    batch = next(iterators[mode])
+                except StopIteration:
+                    finished[mode] = True
+                    continue
+
+                if isinstance(batch, dict):
+                    tagged = dict(batch)
+                    tagged['mode'] = mode
+                    yield tagged
+                else:
+                    yield {'mode': mode, 'batch': batch}
+
 def parse_args():
-    """Parse command line arguments with mode support"""
-    parser = argparse.ArgumentParser(description='Train Multimodal Stellar Model (Multi Tokens)')
-    
-    # Add mode argument
-    parser.add_argument('--mode', type=str, choices=['single_star', 'two_star', 'combined'], 
-                       default='combined', help='Training mode: single_star, two_star, or combined')
-    
-    # Add switch epoch argument for combined mode
-    parser.add_argument('--switch_epoch', type=int, default=7,
-                       help='Epoch to switch from single_star to two_star in combined mode')
-    
-    # Add comparative dataset path for two-star mode
-    parser.add_argument('--comparative_json_file', type=str, 
-                       default='/data/TalkingLatents/data/dataset/comparative_dataset.json',
-                       help='Path to comparative questions JSON file (used in two_star mode)')
-    
-    # Get base arguments
+    """Parse command line arguments with multitoken defaults."""
     args = base_parse_args()
-    
-    # Parse mode-specific arguments
-    remaining_args = sys.argv[1:]
-    mode_args = parser.parse_known_args(remaining_args)[0]
-    
-    # Add mode-specific arguments to base args
-    args.mode = mode_args.mode
-    args.comparative_json_file = mode_args.comparative_json_file
-    args.switch_epoch = mode_args.switch_epoch
-    
     return args
 
 
@@ -74,11 +88,20 @@ def create_datasets_and_loaders(args, device):
     model_path, tokenizer_path = get_model_path(args)
     transf = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
     
-    # Create cache directory for split consistency
-    cache_dir_base = os.path.join(args.output_dir, 'cache')
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    cache_dir = cache_dir_base if rank == 0 else f"{cache_dir_base}_r{rank}"
-    os.makedirs(cache_dir, exist_ok=True)
+    split_root = args.split_cache_root or os.path.join(ROOT_DIR, 'split_cache')
+    os.makedirs(split_root, exist_ok=True)
+
+    def build_split_dir(subfolder: str, json_path: str) -> str:
+        dataset_key = Path(json_path).stem
+        target_dir = os.path.join(split_root, subfolder, dataset_key)
+        if args.allow_new_splits and not os.path.isdir(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+        return target_dir
+
+    single_split_dir = build_split_dir('single', args.json_file)
+    comparative_split_dir = build_split_dir('comparative', args.comparative_json_file)
+
+    allow_new_splits = bool(args.allow_new_splits)
     
     if args.mode == "two_star":
         print(f"Creating two-star comparative datasets from {args.comparative_json_file}...")
@@ -92,7 +115,8 @@ def create_datasets_and_loaders(args, device):
             test_ratio=args.test_ratio,
             random_state=args.random_seed,
             num_workers=args.num_workers,
-            cache_dir=cache_dir,
+            cache_dir=comparative_split_dir,
+            allow_new_splits=allow_new_splits,
             tokenizer_path=tokenizer_path,
             max_length=args.max_seq_length,
             num_stellar_features=args.num_spectral_features,
@@ -100,7 +124,7 @@ def create_datasets_and_loaders(args, device):
         
     elif args.mode == "combined":
         print(f"Creating combined datasets - single_star from {args.json_file} and two_star from {args.comparative_json_file}...")
-        print(f"Will switch from single_star to two_star at epoch {args.switch_epoch}")
+        print("Will interleave single_star and two_star batches within each epoch")
         
         # Create both single-star and two-star dataloaders
         print("Creating single-star dataloaders...")
@@ -113,7 +137,8 @@ def create_datasets_and_loaders(args, device):
             test_ratio=args.test_ratio,
             random_state=args.random_seed,
             num_spectral_features=args.num_spectral_features,
-            cache_dir=cache_dir + "_single",
+            cache_dir=single_split_dir,
+            allow_new_splits=allow_new_splits,
             tokenizer_path=tokenizer_path,  
             max_length=args.max_seq_length,
             batch_size=args.batch_size,
@@ -130,16 +155,41 @@ def create_datasets_and_loaders(args, device):
             test_ratio=args.test_ratio,
             random_state=args.random_seed,
             num_workers=args.num_workers,
-            cache_dir=cache_dir + "_two",
+            cache_dir=comparative_split_dir,
+            allow_new_splits=allow_new_splits,
             tokenizer_path=tokenizer_path,
             max_length=args.max_seq_length,
             num_stellar_features=args.num_spectral_features,
         )
         
-        # Return combined dataloaders - start with single_star
-        train_loader = {'single_star': single_train_loader, 'two_star': two_train_loader}
-        val_loader = {'single_star': single_val_loader, 'two_star': two_val_loader}
-        test_loader = {'single_star': single_test_loader, 'two_star': two_test_loader}
+        interleaved_train = InterleavedDataLoader(
+            {'single_star': single_train_loader, 'two_star': two_train_loader},
+            mode_order=['single_star', 'two_star']
+        )
+        interleaved_val = InterleavedDataLoader(
+            {'single_star': single_val_loader, 'two_star': two_val_loader},
+            mode_order=['single_star', 'two_star']
+        )
+        interleaved_test = InterleavedDataLoader(
+            {'single_star': single_test_loader, 'two_star': two_test_loader},
+            mode_order=['single_star', 'two_star']
+        )
+
+        train_loader = {
+            'mixed': interleaved_train,
+            'single_star': single_train_loader,
+            'two_star': two_train_loader,
+        }
+        val_loader = {
+            'mixed': interleaved_val,
+            'single_star': single_val_loader,
+            'two_star': two_val_loader,
+        }
+        test_loader = {
+            'mixed': interleaved_test,
+            'single_star': single_test_loader,
+            'two_star': two_test_loader,
+        }
         
     else:
         print(f"Creating single-star datasets from {args.json_file}...")
@@ -153,7 +203,8 @@ def create_datasets_and_loaders(args, device):
             test_ratio=args.test_ratio,
             random_state=args.random_seed,
             num_spectral_features=args.num_spectral_features,
-            cache_dir=cache_dir,
+            cache_dir=single_split_dir,
+            allow_new_splits=allow_new_splits,
             tokenizer_path=tokenizer_path,  
             max_length=args.max_seq_length,
             batch_size=args.batch_size,
@@ -248,9 +299,6 @@ def main():
     else:
         print("Single GPU - no DDP")
 
-    print("Creating optimizer and scheduler...")
-    optimizer, scheduler, scaler = create_optimizer_and_scheduler(model, args, train_loader)
-
     print("Creating trainer (tuned LoRA config)...")
     # Load tuned LoRA config (attention-only by default)
     tuned_cfg_path = os.path.join(ROOT_DIR, 'src', 'llm_config_tuned.json')
@@ -267,14 +315,16 @@ def main():
 
     # Handle dataloader for trainer initialization
     if args.mode == "combined":
-        # Start with single_star mode
-        initial_train_loader = train_loader['single_star']
-        initial_val_loader = val_loader['single_star']
+        initial_train_loader = train_loader['mixed']
+        initial_val_loader = val_loader['mixed']
         initial_mode = "single_star"
     else:
         initial_train_loader = train_loader
         initial_val_loader = val_loader
         initial_mode = args.mode
+
+    print("Creating optimizer and scheduler...")
+    optimizer, scheduler, scaler = create_optimizer_and_scheduler(model, args, initial_train_loader)
 
     trainer = LLMTrainer(
         model=model,
@@ -296,12 +346,13 @@ def main():
         mode=initial_mode,
     )
     
-    # Store combined mode information in trainer for mode switching
+    # Store combined mode information in trainer for mode-aware batching
     if args.mode == "combined":
         trainer.combined_mode = True
-        trainer.switch_epoch = args.switch_epoch
         trainer.single_star_loaders = {'train': train_loader['single_star'], 'val': val_loader['single_star']}
         trainer.two_star_loaders = {'train': train_loader['two_star'], 'val': val_loader['two_star']}
+        trainer.mixed_train_loader = train_loader['mixed']
+        trainer.mixed_val_loader = val_loader['mixed']
         trainer.original_mode = args.mode
     else:
         trainer.combined_mode = False

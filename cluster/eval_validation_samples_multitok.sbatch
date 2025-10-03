@@ -38,6 +38,8 @@ TEMP=${TEMP:-0.2}
 TOPP=${TOPP:-0.8}
 SEED=${SEED:-42}
 LLM_PREC=${LLM_PREC:-fp16}
+SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
+ALLOW_SPLIT_REGEN=${ALLOW_SPLIT_REGEN:-0}
 
 mkdir -p "${OUTDIR}"
 
@@ -59,7 +61,12 @@ SR_ARGS=(
   --top_p "${TOPP}"
   --random_seed "${SEED}"
   --llm_precision "${LLM_PREC}"
+  --split_cache_root "${SPLIT_CACHE_ROOT}"
 )
+
+if [[ "${ALLOW_SPLIT_REGEN}" == "1" ]]; then
+  SR_ARGS+=(--allow_new_splits)
+fi
 
 if [[ -n "${RESUME:-}" ]]; then
   srun --kill-on-bad-exit=1 \
@@ -76,4 +83,3 @@ else
     python -u src/eval_validation_samples_multitok.py \
       "${SR_ARGS[@]}"
 fi
-
