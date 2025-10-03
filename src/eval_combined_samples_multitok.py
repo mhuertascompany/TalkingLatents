@@ -55,6 +55,8 @@ def parse_args():
     parser.add_argument('--hidden_dim', type=int, default=512)
     parser.add_argument('--num_spectral_features', type=int, default=8,
                         help='Number of spectral tokens per star')
+    parser.add_argument('--batch_size', type=int, default=1,
+                        help='Dummy batch size used for LLM loading helpers')
     parser.add_argument('--max_seq_length', type=int, default=128)
     parser.add_argument('--num_samples', type=int, default=10,
                         help='Total samples to evaluate (will be split across datasets)')
@@ -221,13 +223,13 @@ def main():
         cache_dir=os.path.join(args.output_dir, 'cache_single'),
         tokenizer_path=tokenizer_path,
         max_length=args.max_seq_length,
-        batch_size=1,
+        batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
     comp_train, comp_val, comp_test = create_comparative_dataloaders(
         json_file=args.comparative_json_file,
         features_array=spectral_features,
-        batch_size=1,
+        batch_size=args.batch_size,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
