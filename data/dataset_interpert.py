@@ -307,7 +307,7 @@ class StellarQuestionsDataset(Dataset):
         # Try to load cached splits
         if cache_file and os.path.exists(cache_file):
             print(f"Loading cached splits from {cache_file}")
-            cached = np.load(cache_file)
+            cached = np.load(cache_file, allow_pickle=True)
             train_indices = cached['train_indices']
             val_indices = cached['val_indices'] 
             test_indices = cached['test_indices']
