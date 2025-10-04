@@ -360,6 +360,13 @@ class Trainer(object):
             if (self.max_iter is not None) and (self.max_iter >= 0) and (i >= self.max_iter):
                 break
 
+        if dist.is_initialized():
+            torch.cuda.synchronize()
+        self.model.train()
+
+        avg_acc = all_accs / total if total > 0 else all_accs
+        return val_loss, avg_acc
+
     def _run_mid_epoch_validation(self, epoch: int, iteration: int, device):
         if self.val_dl is None or self.validation_interval is None:
             return
