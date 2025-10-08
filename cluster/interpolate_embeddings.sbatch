@@ -48,9 +48,9 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-if [[ -z "${ALPHAS}" ]]; then
-  echo "ERROR: ALPHAS must be set (e.g. -1.0,-0.5,0,0.5,1.0)" >&2
-  exit 1
+ALPHA_FLAG=()
+if [[ -n "${ALPHAS}" ]]; then
+  ALPHA_FLAG=(--alphas "${ALPHAS}")
 fi
 
 srun --kill-on-bad-exit=1 \
@@ -64,8 +64,8 @@ srun --kill-on-bad-exit=1 \
     --llm_path "${LLM_PATH}" \
     --split "${SPLIT}" \
     --num_samples "${NUM_SAMPLES}" \
-    --alphas "${ALPHAS}" \
-    --random_seed 42
+    --random_seed 42 \
+    "${ALPHA_FLAG[@]}"
 
 srun --kill-on-bad-exit=1 \
   python -u analysis/interp/eval_interpolation_npz.py \
