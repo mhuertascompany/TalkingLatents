@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--temperature', type=float, default=0.0)
     parser.add_argument('--top_p', type=float, default=0.0)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--batch_size', type=int, default=1,
+                        help='Dummy batch size needed by _load_llm_model')
     return parser.parse_args()
 
 

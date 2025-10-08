@@ -41,6 +41,7 @@ MAX_ALPHAS_PER_SAMPLE=${MAX_ALPHAS_PER_SAMPLE:-5}
 NPZ_PATH=${NPZ_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.npz}
 META_PATH=${META_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.metadata.json}
 OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
+BATCH_SIZE=${BATCH_SIZE:-1}
 
 if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
   echo "ERROR: RESUME checkpoint not found. Set RESUME to a valid *_resume_last.pth path." >&2
@@ -83,6 +84,7 @@ srun --kill-on-bad-exit=1 \
     --top_p "${TOPP}" \
     --num_spectral_features 8 \
     --max_seq_length 128 \
+    --batch_size "${BATCH_SIZE}" \
     --random_seed 42
 
 echo "Interpolation outputs written to ${OUTFILE}"
