@@ -72,7 +72,7 @@ if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
       --output_metadata "${META_PATH}" \
       --llm_path "${LLM_PATH}" \
       --split "${SPLIT}" \
-      --num_samples "${BUILD_NUM_SAMPLES}" \
+      --build_num_samples "${BUILD_NUM_SAMPLES}" \
       --alphas_per_sample "${ALPHAS_PER_SAMPLE}" \
       --random_seed 42 \
       "${LIMIT_ARG[@]}" \
