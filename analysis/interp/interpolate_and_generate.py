@@ -186,8 +186,8 @@ def main():
             stellar_a = batch.get('star_a_params', [{}])[0]
             stellar_b = batch.get('star_b_params', [{}])[0]
 
-           for alpha in alphas:
-               latent_interp = latent_a + alpha * latent_b
+            for alpha in alphas:
+                latent_interp = latent_a + alpha * latent_b
                 gpu_batch = {
                     'input_ids': batch['input_ids'].to(device),
                     'target_ids': batch['target_ids'].to(device),
