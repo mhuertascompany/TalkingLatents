@@ -54,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--max_seq_length', type=int, default=128)
     parser.add_argument('--num_spectral_features', type=int, default=8)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--max_alphas_per_sample', type=int, default=None,
+                        help='Optional cap on the number of alpha values per sample')
     return parser.parse_args()
 
 
@@ -138,6 +140,20 @@ def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device)
     return model
 
 
+def get_batch_on_device(batch: Dict[str, Any], latent_a: torch.Tensor,
+                        latent_b: torch.Tensor, device: torch.device) -> Dict[str, torch.Tensor]:
+    gpu_batch = {
+        'input_ids': batch['input_ids'].to(device),
+        'target_ids': batch['target_ids'].to(device),
+        'star_a_feature_indices': batch['star_a_feature_indices'].to(device),
+        'star_b_feature_indices': batch['star_b_feature_indices'].to(device),
+        'answer_start_indices': batch['answer_start_indices'].to(device),
+    }
+    gpu_batch['masked_spectra_a'] = latent_a
+    gpu_batch['masked_spectra_b'] = latent_b
+    return gpu_batch
+
+
 def main():
     args = parse_args()
     random.seed(args.random_seed)
@@ -155,7 +171,10 @@ def main():
 
     model = build_model(args, latent_dim, device)
 
-    alphas = [float(x) for x in args.alphas.split(',') if x.strip()]
+    alpha_values = [float(x) for x in args.alphas.split(',') if x.strip()]
+    if args.max_alphas_per_sample is not None:
+        alpha_values = alpha_values[:max(1, args.max_alphas_per_sample)]
+    alphas = alpha_values
     if 0.0 not in alphas:
         alphas.append(0.0)
     alphas = sorted(alphas)
@@ -188,15 +207,7 @@ def main():
 
             for alpha in alphas:
                 latent_interp = latent_a + alpha * latent_b
-                gpu_batch = {
-                    'input_ids': batch['input_ids'].to(device),
-                    'target_ids': batch['target_ids'].to(device),
-                    'star_a_feature_indices': batch['star_a_feature_indices'].to(device),
-                    'star_b_feature_indices': batch['star_b_feature_indices'].to(device),
-                    'answer_start_indices': batch['answer_start_indices'].to(device),
-                    'masked_spectra_a': latent_interp,
-                    'masked_spectra_b': latent_b,
-                }
+                gpu_batch = get_batch_on_device(batch, latent_interp, latent_b, device)
 
                 with torch.no_grad():
                     gen_text, input_text, target_text, logps = model.generate_response_from_batch(

@@ -37,6 +37,10 @@ ALPHAS=${ALPHAS:--1.0,-0.5,0.0,0.5,1.0}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-120}
 TEMPERATURE=${TEMPERATURE:-0.0}
 TOPP=${TOPP:-0.0}
+MAX_ALPHAS_PER_SAMPLE=${MAX_ALPHAS_PER_SAMPLE:-5}
+NPZ_PATH=${NPZ_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.npz}
+META_PATH=${META_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.metadata.json}
+OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
 
 if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
   echo "ERROR: RESUME checkpoint not found. Set RESUME to a valid *_resume_last.pth path." >&2
@@ -44,31 +48,41 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
-
 if [[ -z "${ALPHAS}" ]]; then
   echo "ERROR: ALPHAS must be set (e.g. -1.0,-0.5,0,0.5,1.0)" >&2
   exit 1
 fi
-ALPHA_ARG="--alphas=${ALPHAS}"
 
 srun --kill-on-bad-exit=1 \
-  python -u analysis/interp/interpolate_and_generate.py \
+  python -u analysis/interp/build_interpolation_npz.py \
     --json_file "${JSON_FILE}" \
     --comparative_json_file "${COMP_JSON_FILE}" \
     --features_file "${FEATURES_FILE}" \
     --split_cache_root "${SPLIT_CACHE_ROOT}" \
-    --resume_path "${RESUME}" \
+    --output_npz "${NPZ_PATH}" \
+    --output_metadata "${META_PATH}" \
     --llm_path "${LLM_PATH}" \
-    --output "${OUTFILE}" \
     --split "${SPLIT}" \
     --num_samples "${NUM_SAMPLES}" \
+    --alphas "${ALPHAS}" \
+    --random_seed 42
+
+srun --kill-on-bad-exit=1 \
+  python -u analysis/interp/eval_interpolation_npz.py \
+    --json_file "${JSON_FILE}" \
+    --comparative_json_file "${COMP_JSON_FILE}" \
+    --split_cache_root "${SPLIT_CACHE_ROOT}" \
+    --resume_path "${RESUME}" \
+    --interpolation_npz "${NPZ_PATH}" \
+    --metadata_json "${META_PATH}" \
+    --output "${OUTFILE}" \
+    --llm_path "${LLM_PATH}" \
+    --split "${SPLIT}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --temperature "${TEMPERATURE}" \
     --top_p "${TOPP}" \
     --num_spectral_features 8 \
     --max_seq_length 128 \
-    --random_seed 42 \
-    "${ALPHA_ARG}"
+    --random_seed 42
 
 echo "Interpolation outputs written to ${OUTFILE}"
