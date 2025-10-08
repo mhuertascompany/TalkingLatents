@@ -28,6 +28,7 @@ COMP_JSON_FILE=${COMP_JSON_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/c
 FEATURES_FILE=${FEATURES_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/features.npy}
 RESUME=${RESUME:-$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_last.pth 2>/dev/null | head -1 || true)}
 SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
+LLM_PATH=${LLM_PATH:-/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original}
 OUTPUT_DIR=${OUTPUT_DIR:-logs/interp}
 EXP=${EXP:-interp_run}
 SPLIT=${SPLIT:-val}
@@ -58,6 +59,7 @@ srun --kill-on-bad-exit=1 \
     --features_file "${FEATURES_FILE}" \
     --split_cache_root "${SPLIT_CACHE_ROOT}" \
     --resume_path "${RESUME}" \
+    --llm_path "${LLM_PATH}" \
     --output "${OUTFILE}" \
     --split "${SPLIT}" \
     --num_samples "${NUM_SAMPLES}" \
