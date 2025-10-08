@@ -2,12 +2,14 @@
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 ROOT = Path(__file__).resolve().parents[2]
 import sys
@@ -62,6 +64,25 @@ def load_features(path: Path) -> np.ndarray:
     if arr.ndim != 2:
         raise ValueError(f"Expected 2D array of embeddings, got shape {arr.shape}")
     return arr
+
+
+def setup_single_gpu(device_str: str) -> torch.device:
+    if device_str != 'cuda':
+        return torch.device(device_str)
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA required for interpolation evaluation')
+    os.environ.setdefault('MASTER_ADDR', '127.0.0.1')
+    os.environ.setdefault('MASTER_PORT', '29500')
+    if not dist.is_initialized():
+        dist.init_process_group('gloo', rank=0, world_size=1)
+    try:
+        import fairscale.nn.model_parallel.initialize as fs_init
+        if not fs_init.model_parallel_is_initialized():
+            fs_init.initialize_model_parallel(1)
+    except Exception:
+        pass
+    torch.cuda.set_device(0)
+    return torch.device('cuda', 0)
 
 
 def load_comparative_dataset(args: argparse.Namespace, tokenizer_path: str):
@@ -123,7 +144,7 @@ def main():
     np.random.seed(args.random_seed)
     torch.manual_seed(args.random_seed)
 
-    device = torch.device(args.device)
+    device = setup_single_gpu(args.device)
 
     features = load_features(Path(args.features_file))
     latent_dim = features.shape[1]
