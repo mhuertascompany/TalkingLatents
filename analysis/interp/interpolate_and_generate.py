@@ -186,20 +186,27 @@ def main():
             stellar_a = batch.get('star_a_params', [{}])[0]
             stellar_b = batch.get('star_b_params', [{}])[0]
 
-            for alpha in alphas:
-                latent_interp = latent_a + alpha * latent_b
-                batch_copy = {k: v.clone() if torch.is_tensor(v) else v for k, v in batch.items()}
-                batch_copy['masked_spectra_a'] = latent_interp
-                batch_copy['masked_spectra_b'] = latent_b
+           for alpha in alphas:
+               latent_interp = latent_a + alpha * latent_b
+                gpu_batch = {
+                    'input_ids': batch['input_ids'].to(device),
+                    'target_ids': batch['target_ids'].to(device),
+                    'star_a_feature_indices': batch['star_a_feature_indices'].to(device),
+                    'star_b_feature_indices': batch['star_b_feature_indices'].to(device),
+                    'answer_start_indices': batch['answer_start_indices'].to(device),
+                    'masked_spectra_a': latent_interp,
+                    'masked_spectra_b': latent_b,
+                }
 
-                gen_text, input_text, target_text, logps = model.generate_response_from_batch(
-                    batch_data=batch_copy,
-                    batch_idx=0,
-                    tokenizer=tokenizer,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                )
+                with torch.no_grad():
+                    gen_text, input_text, target_text, logps = model.generate_response_from_batch(
+                        batch_data=gpu_batch,
+                        batch_idx=0,
+                        tokenizer=tokenizer,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
 
                 record = {
                     'dataset_index': dataset_idx,
