@@ -37,8 +37,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--split', choices=['train', 'val', 'test'], default='val')
     parser.add_argument('--num_samples', type=int, default=50,
                         help='Number of comparative samples to process')
-    parser.add_argument('--alphas', type=str, default='-1.0,-0.5,0.0,0.5,1.0',
-                        help='Comma-separated α values for interpolation')
+    parser.add_argument('--alphas_per_sample', type=int, default=3,
+                        help='Number of random α values sampled per dataset example')
+    parser.add_argument('--max_total', type=int, default=None,
+                        help='Optional cap on total number of interpolations')
     parser.add_argument('--train_ratio', type=float, default=0.8)
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.1)
@@ -95,11 +97,6 @@ def main():
     _, tokenizer_path = get_model_path(args)
     loader = load_dataloader(args, tokenizer_path, features)
 
-    alphas = [float(x) for x in args.alphas.split(',') if x.strip()]
-    if 0.0 not in alphas:
-        alphas.append(0.0)
-    alphas = sorted(alphas)
-
     selected_indices = random.sample(range(len(loader.dataset)),
                                      min(args.num_samples, len(loader.dataset)))
 
@@ -125,7 +122,14 @@ def main():
         star_a_params = make_jsonable(batch.get('star_a_params', [{}])[0])
         star_b_params = make_jsonable(batch.get('star_b_params', [{}])[0])
 
-        for alpha in alphas:
+        alpha_values = np.random.uniform(-1.0, 1.0, size=args.alphas_per_sample)
+        if args.max_total is not None:
+            remaining = args.max_total - len(latent_a_list)
+            if remaining <= 0:
+                break
+            alpha_values = alpha_values[:remaining]
+
+        for alpha in alpha_values:
             interp_a = base_a + alpha * base_b
             latent_a_list.append(interp_a.astype(np.float32))
             latent_b_list.append(base_b.astype(np.float32))
@@ -139,6 +143,8 @@ def main():
                 'star_a_params': star_a_params,
                 'star_b_params': star_b_params,
             })
+        if args.max_total is not None and len(latent_a_list) >= args.max_total:
+            break
 
     latent_a = np.stack(latent_a_list)
     latent_b = np.stack(latent_b_list)

@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='Dummy batch size needed by _load_llm_model')
+    parser.add_argument('--num_samples', type=int, default=25,
+                        help='Number of interpolations to evaluate (random subset)')
     return parser.parse_args()
 
 
@@ -151,8 +153,13 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    total = latent_a.shape[0]
+    rng = np.random.default_rng(args.random_seed)
+    num_eval = min(args.num_samples, total)
+    eval_indices = rng.choice(total, size=num_eval, replace=False)
+
     with open(output_path, 'w') as fh:
-        for i in range(latent_a.shape[0]):
+        for i in eval_indices:
             idx = int(dataset_indices[i])
             alpha = float(alphas[i])
             meta = meta_records[i]
@@ -175,16 +182,20 @@ def main():
                     top_p=args.top_p,
                 )
 
-            record = {
-                'dataset_index': idx,
-                'alpha': alpha,
-                'question': input_text,
-                'true_answer': target_text,
-                'generated_text': gen_text,
-                'log_probs': logps,
-                'metadata': meta,
-            }
+           record = {
+               'dataset_index': idx,
+               'alpha': alpha,
+               'question': input_text,
+               'true_answer': target_text,
+               'generated_text': gen_text,
+               'log_probs': logps,
+               'metadata': meta,
+           }
             fh.write(json.dumps(record) + '\n')
+
+            del gpu_batch, latent_a_tensor, latent_b_tensor
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
     print(f"Wrote evaluation results to {output_path}")
 

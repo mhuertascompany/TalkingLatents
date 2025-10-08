@@ -32,12 +32,14 @@ LLM_PATH=${LLM_PATH:-/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-L
 OUTPUT_DIR=${OUTPUT_DIR:-logs/interp}
 EXP=${EXP:-interp_run}
 SPLIT=${SPLIT:-val}
-NUM_SAMPLES=${NUM_SAMPLES:-1}
-ALPHAS=${ALPHAS:-0.5}
-MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-60}
+BUILD_NUM_SAMPLES=${BUILD_NUM_SAMPLES:-100}
+ALPHAS_PER_SAMPLE=${ALPHAS_PER_SAMPLE:-5}
+ALPHAS=${ALPHAS:-}
+MAX_TOTAL=${MAX_TOTAL:-0}
+EVAL_NUM_SAMPLES=${EVAL_NUM_SAMPLES:-25}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-120}
 TEMPERATURE=${TEMPERATURE:-0.0}
 TOPP=${TOPP:-0.0}
-MAX_ALPHAS_PER_SAMPLE=${MAX_ALPHAS_PER_SAMPLE:-5}
 NPZ_PATH=${NPZ_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.npz}
 META_PATH=${META_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.metadata.json}
 OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
@@ -49,24 +51,33 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-ALPHA_FLAG=()
-if [[ -n "${ALPHAS}" ]]; then
-  ALPHA_FLAG=(--alphas="${ALPHAS}")
-fi
+REBUILD=${REBUILD:-0}
+if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
+  EXTRA_ALPHA=()
+  if [[ -n "${ALPHAS}" ]]; then
+    EXTRA_ALPHA=(--alphas "${ALPHAS}")
+  fi
+  LIMIT_ARG=()
+  if [[ "${MAX_TOTAL}" != "0" ]]; then
+    LIMIT_ARG=(--max_total "${MAX_TOTAL}")
+  fi
 
-srun --kill-on-bad-exit=1 \
-  python -u analysis/interp/build_interpolation_npz.py \
-    --json_file "${JSON_FILE}" \
-    --comparative_json_file "${COMP_JSON_FILE}" \
-    --features_file "${FEATURES_FILE}" \
-    --split_cache_root "${SPLIT_CACHE_ROOT}" \
-    --output_npz "${NPZ_PATH}" \
-    --output_metadata "${META_PATH}" \
-    --llm_path "${LLM_PATH}" \
-    --split "${SPLIT}" \
-    --num_samples "${NUM_SAMPLES}" \
-    --random_seed 42 \
-    "${ALPHA_FLAG[@]}"
+  srun --kill-on-bad-exit=1 \
+    python -u analysis/interp/build_interpolation_npz.py \
+      --json_file "${JSON_FILE}" \
+      --comparative_json_file "${COMP_JSON_FILE}" \
+      --features_file "${FEATURES_FILE}" \
+      --split_cache_root "${SPLIT_CACHE_ROOT}" \
+      --output_npz "${NPZ_PATH}" \
+      --output_metadata "${META_PATH}" \
+      --llm_path "${LLM_PATH}" \
+      --split "${SPLIT}" \
+      --num_samples "${BUILD_NUM_SAMPLES}" \
+      --alphas_per_sample "${ALPHAS_PER_SAMPLE}" \
+      --random_seed 42 \
+      "${LIMIT_ARG[@]}" \
+      "${EXTRA_ALPHA[@]}"
+fi
 
 srun --kill-on-bad-exit=1 \
   python -u analysis/interp/eval_interpolation_npz.py \
@@ -79,6 +90,7 @@ srun --kill-on-bad-exit=1 \
     --output "${OUTFILE}" \
     --llm_path "${LLM_PATH}" \
     --split "${SPLIT}" \
+    --num_samples "${EVAL_NUM_SAMPLES}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --temperature "${TEMPERATURE}" \
     --top_p "${TOPP}" \
