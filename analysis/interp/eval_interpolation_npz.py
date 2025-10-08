@@ -182,15 +182,15 @@ def main():
                     top_p=args.top_p,
                 )
 
-           record = {
-               'dataset_index': idx,
-               'alpha': alpha,
-               'question': input_text,
-               'true_answer': target_text,
-               'generated_text': gen_text,
-               'log_probs': logps,
-               'metadata': meta,
-           }
+            record = {
+                'dataset_index': idx,
+                'alpha': alpha,
+                'question': input_text,
+                'true_answer': target_text,
+                'generated_text': gen_text,
+                'log_probs': logps,
+                'metadata': meta,
+            }
             fh.write(json.dumps(record) + '\n')
 
             del gpu_batch, latent_a_tensor, latent_b_tensor
