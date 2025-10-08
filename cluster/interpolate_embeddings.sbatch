@@ -50,7 +50,7 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 ALPHA_FLAG=()
 if [[ -n "${ALPHAS}" ]]; then
-  ALPHA_FLAG=(--alphas "${ALPHAS}")
+  ALPHA_FLAG=(--alphas="${ALPHAS}")
 fi
 
 srun --kill-on-bad-exit=1 \
