@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=30
 #SBATCH --hint=nomultithread
 #SBATCH --time=02:00:00
 #SBATCH -C v100-32g
