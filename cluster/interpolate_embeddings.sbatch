@@ -51,7 +51,7 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-REBUILD=${REBUILD:-0}
+REBUILD=${REBUILD:-1}
 if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
   EXTRA_ALPHA=()
   if [[ -n "${ALPHAS}" ]]; then
