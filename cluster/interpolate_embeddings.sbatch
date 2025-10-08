@@ -49,7 +49,7 @@ if [[ -z "${ALPHAS}" ]]; then
   echo "ERROR: ALPHAS must be set (e.g. -1.0,-0.5,0,0.5,1.0)" >&2
   exit 1
 fi
-ALPHA_ARGS=(--alphas "${ALPHAS}")
+ALPHA_ARG="--alphas=${ALPHAS}"
 
 srun --kill-on-bad-exit=1 \
   python -u analysis/interp/interpolate_and_generate.py \
@@ -67,6 +67,6 @@ srun --kill-on-bad-exit=1 \
     --num_spectral_features 8 \
     --max_seq_length 128 \
     --random_seed 42 \
-    "${ALPHA_ARGS[@]}"
+    "${ALPHA_ARG}"
 
 echo "Interpolation outputs written to ${OUTFILE}"
