@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
                         help='Path to comparative questions JSON (defaults to --json_file if omitted)')
     parser.add_argument('--features_file', type=str, required=True,
                         help='NumPy .npy file with precomputed FM embeddings (same as training)')
+    parser.add_argument('--llm_path', type=str, default=None,
+                        help='Optional explicit path to LLaMA weights')
     parser.add_argument('--split_cache_root', type=str, required=True,
                         help='Root directory with cached splits (created during training)')
     parser.add_argument('--resume_path', type=str, required=True,
