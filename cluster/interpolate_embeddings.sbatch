@@ -45,6 +45,12 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
 
+if [[ -z "${ALPHAS}" ]]; then
+  echo "ERROR: ALPHAS must be set (e.g. -1.0,-0.5,0,0.5,1.0)" >&2
+  exit 1
+fi
+ALPHA_ARGS=(--alphas "${ALPHAS}")
+
 srun --kill-on-bad-exit=1 \
   python -u analysis/interp/interpolate_and_generate.py \
     --json_file "${JSON_FILE}" \
@@ -55,12 +61,12 @@ srun --kill-on-bad-exit=1 \
     --output "${OUTFILE}" \
     --split "${SPLIT}" \
     --num_samples "${NUM_SAMPLES}" \
-    --alphas "${ALPHAS}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --temperature "${TEMPERATURE}" \
     --top_p "${TOPP}" \
     --num_spectral_features 8 \
     --max_seq_length 128 \
-    --random_seed 42
+    --random_seed 42 \
+    "${ALPHA_ARGS[@]}"
 
 echo "Interpolation outputs written to ${OUTFILE}"
