@@ -107,8 +107,19 @@ def main():
         sample = loader.dataset[dataset_idx]
         batch = collate_comparative_fn([sample])
 
-        idx_a = batch['features_a_indices'][0]
-        idx_b = batch['features_b_indices'][0]
+        def to_index(val):
+            if isinstance(val, torch.Tensor):
+                return int(val.item())
+            if isinstance(val, (list, tuple, np.ndarray)):
+                return int(val[0])
+            return int(val)
+
+        if 'features_a_indices' in batch:
+            idx_a = to_index(batch['features_a_indices'][0])
+            idx_b = to_index(batch['features_b_indices'][0])
+        else:
+            idx_a = to_index(batch.get('star_a_df_index', [0])[0])
+            idx_b = to_index(batch.get('star_b_df_index', [0])[0])
         latent_a = features[int(idx_a)]
         latent_b = features[int(idx_b)]
 
