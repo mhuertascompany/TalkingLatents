@@ -4,8 +4,9 @@ import argparse
 import json
 import os
 import socket
+import re
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Callable, Tuple, List
 
 import numpy as np
 import torch
@@ -55,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--alpha_sweep', action='store_true',
+                        help='Evaluate a sweep of alpha values instead of using stored latents')
+    parser.add_argument('--alpha_start', type=float, default=0.0)
+    parser.add_argument('--alpha_end', type=float, default=1.0)
+    parser.add_argument('--alpha_step', type=float, default=0.1)
     return parser.parse_args()
 
 
@@ -124,6 +130,46 @@ def extract_physical_properties(params):
     return result or None
 
 
+def _prefer_value(params: dict, candidates: List[str]):
+    if not isinstance(params, dict):
+        return None
+    lowered = {k.lower(): k for k in params.keys()}
+    for cand in candidates:
+        if cand in lowered:
+            return params[lowered[cand]]
+    for key in params.keys():
+        low = key.lower()
+        if any(cand in low for cand in candidates):
+            return params[key]
+    return None
+
+
+def extract_star_params(params: dict):
+    teff = _prefer_value(params, ['teff', 'teff_k', 'teff_model_k'])
+    logg = _prefer_value(params, ['logg', 'logg_model'])
+    feh = _prefer_value(params, ['feh', '[fe/h]'])
+    return teff, logg, feh
+
+
+def parse_inferred_properties(text: str):
+    teff_match = re.search(r'teff\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    logg_match = re.search(r'log\s*g?\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    feh_match = re.search(r'(feh|\[fe/?h\])\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    teff = float(teff_match.group(1)) if teff_match else None
+    logg = float(logg_match.group(1)) if logg_match else None
+    feh = float(feh_match.group(2)) if feh_match else None
+    return teff, logg, feh
+
+
+def to_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device) -> MultimodalLlamaModelMultiTokens:
     llm = _load_llm_model(args)
     llm = llm.to(device)
@@ -144,12 +190,6 @@ def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device)
     model.eval()
     model.mode = 'single_star'
     return model
-
-
-def encode_prompt(tokenizer: Tokenizer) -> Tuple[str, torch.Tensor]:
-    prompt = "Describe the physical properties of this star."
-    tokens = tokenizer.encode(prompt, bos=True, eos=False)
-    return prompt, torch.tensor([tokens], dtype=torch.long)
 
 
 def load_eval_dataset(args: argparse.Namespace,
@@ -201,6 +241,24 @@ def load_eval_dataset(args: argparse.Namespace,
     return loaders[args.split].dataset, collate_comparative_fn
 
 
+def build_prompt_batch(tokenizer: Tokenizer, prompt_text: str, device: torch.device,
+                       max_seq_length: int) -> dict:
+    tokens = tokenizer.encode(prompt_text, bos=True, eos=False)
+    tokens = tokens[:max_seq_length]
+    input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+    target_ids = torch.full_like(input_ids, -100)
+    feature_start_indices = torch.tensor([0], dtype=torch.long, device=device)
+    answer_start_indices = torch.tensor([input_ids.size(1)], dtype=torch.long, device=device)
+    return {
+        'input_ids': input_ids,
+        'target_ids': target_ids,
+        'feature_start_indices': feature_start_indices,
+        'answer_start_indices': answer_start_indices,
+        'input_texts': [prompt_text],
+        'target_texts': [''],
+    }
+
+
 def main():
     args = parse_args()
     device = setup_single_gpu(args.device)
@@ -230,56 +288,167 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    sweep_alphas = None
+    if args.alpha_sweep:
+        if args.alpha_step <= 0:
+            raise ValueError('alpha_step must be positive when using alpha_sweep')
+        sweep_alphas = np.arange(args.alpha_start, args.alpha_end + 1e-8, args.alpha_step)
+        if sweep_alphas.size == 0:
+            raise ValueError('No alpha values generated; check alpha_start/end/step settings')
+
+    seen_keys = set()
+    selected_indices: List[int] = []
+    for idx in eval_indices:
+        meta = metadata_records[idx]
+        ds_idx = int(dataset_indices[idx])
+        partner_idx = meta.get('partner_dataset_index') if args.dataset == 'single' else meta.get('obsid_b')
+        key = (ds_idx, partner_idx)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        selected_indices.append(idx)
+        if len(selected_indices) >= args.num_samples:
+            break
+
     with open(output_path, 'w') as fh:
-        for i in eval_indices:
-            dataset_idx = int(dataset_indices[i])
-            sample = dataset[dataset_idx]
-            batch = collate_fn([sample])
+        if args.alpha_sweep:
+            prompt_template = (
+                "This latent embedding corresponds to a star obtained by interpolating between two "
+                "stars with weight alpha={alpha:.2f}. Estimate its physical properties and respond exactly "
+                "in the format: Teff=<value> K, logg=<value>, FeH=<value>."
+            )
 
-            latent_np = latents[i].astype(np.float32)
-            alpha = float(alphas[i])
-            meta = metadata_records[i]
+            for idx in selected_indices:
+                meta = metadata_records[idx]
+                dataset_idx = int(dataset_indices[idx])
 
-            if args.dataset == 'single':
-                latent_tensor = torch.from_numpy(latent_np).to(batch['masked_spectra'].dtype)
-                batch['masked_spectra'][0] = latent_tensor
-                if batch.get('features') is not None and isinstance(batch['features'], torch.Tensor):
-                    batch['features'][0] = latent_tensor
-            else:
-                # Two-star interpolation currently replaces Star A latent only
-                latent_tensor = torch.from_numpy(latent_np)
-                if 'masked_spectra_a' in batch:
-                    batch['masked_spectra_a'][0] = latent_tensor
+                if args.dataset == 'single':
+                    partner_idx = meta.get('partner_dataset_index')
+                    if partner_idx is None:
+                        raise ValueError('partner_dataset_index missing in metadata for single dataset sweep')
+                    sample_a = dataset[dataset_idx]
+                    sample_b = dataset[partner_idx]
+                    batch_a = single_collate_fn([sample_a])
+                    batch_b = single_collate_fn([sample_b])
+                    latent_a = batch_a['masked_spectra'][0].cpu().numpy().astype(np.float32)
+                    latent_b = batch_b['masked_spectra'][0].cpu().numpy().astype(np.float32)
+                else:
+                    sample = dataset[dataset_idx]
+                    base_batch = collate_fn([sample])
+                    latent_a = base_batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
+                    latent_b = base_batch['masked_spectra_b'][0].cpu().numpy().astype(np.float32)
+                    partner_idx = None
 
-            with torch.no_grad():
-                gen_text, input_text, target_text, logps = model.generate_response_from_batch(
-                    batch_data=batch,
-                    batch_idx=0,
-                    tokenizer=tokenizer,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
+                star_a_params = meta.get('star_a_params', {}) or {}
+                star_b_params = meta.get('star_b_params', {}) or {}
+                teff_a, logg_a, feh_a = extract_star_params(star_a_params)
+                teff_b, logg_b, feh_b = extract_star_params(star_b_params)
+                teff_a, logg_a, feh_a = to_float(teff_a), to_float(logg_a), to_float(feh_a)
+                teff_b, logg_b, feh_b = to_float(teff_b), to_float(logg_b), to_float(feh_b)
+
+                fh.write(
+                    f"# dataset_index={dataset_idx}, partner_index={partner_idx}, "
+                    f"obsid_a={meta.get('obsid_a')}, obsid_b={meta.get('obsid_b')}\n"
+                )
+                fh.write(
+                    "alpha,inferred_teff,inferred_logg,inferred_feh,"
+                    "star_a_teff,star_a_logg,star_a_feh,"
+                    "star_b_teff,star_b_logg,star_b_feh\n"
                 )
 
-            record = {
-                'dataset_index': dataset_idx,
-                'alpha': alpha,
-                'question': input_text,
-                'true_answer': target_text,
-                'generated_text': gen_text,
-                'log_probs': logps,
-                'metadata': {
-                    'obsid_a': meta.get('obsid_a'),
-                    'obsid_b': meta.get('obsid_b'),
-                    'star_a_physical_properties': extract_physical_properties(meta.get('star_a_params')),
-                    'star_b_physical_properties': extract_physical_properties(meta.get('star_b_params')),
-                    'partner_dataset_index': meta.get('partner_dataset_index'),
-                },
-            }
-            fh.write(json.dumps(record) + '\n')
+                for alpha in sweep_alphas:
+                    interp = (1.0 - alpha) * latent_a + alpha * latent_b
+                    latent_tensor = torch.from_numpy(interp.astype(np.float32)).unsqueeze(0).to(device)
 
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
+                    prompt_text = prompt_template.format(alpha=alpha)
+                    batch_prompt = build_prompt_batch(tokenizer, prompt_text, device, args.max_seq_length)
+                    batch_prompt['masked_spectra'] = latent_tensor
+
+                    with torch.no_grad():
+                        gen_text, _, _, _ = model.generate_response_from_batch(
+                            batch_data=batch_prompt,
+                            batch_idx=0,
+                            tokenizer=tokenizer,
+                            max_new_tokens=args.max_new_tokens,
+                            temperature=args.temperature,
+                            top_p=args.top_p,
+                        )
+
+                    pred_teff, pred_logg, pred_feh = parse_inferred_properties(gen_text)
+
+                    def fmt(val):
+                        if val is None:
+                            return ''
+                        if abs(val) >= 100:
+                            return f"{val:.1f}"
+                        return f"{val:.3f}"
+
+                    row = [
+                        f"{alpha:.2f}",
+                        fmt(pred_teff),
+                        fmt(pred_logg),
+                        fmt(pred_feh),
+                        fmt(teff_a),
+                        fmt(logg_a),
+                        fmt(feh_a),
+                        fmt(teff_b),
+                        fmt(logg_b),
+                        fmt(feh_b),
+                    ]
+                    fh.write(','.join(row) + '\n')
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+
+                fh.write('\n')
+        else:
+            for idx in selected_indices:
+                dataset_idx = int(dataset_indices[idx])
+                sample = dataset[dataset_idx]
+                batch = collate_fn([sample])
+
+                latent_np = latents[idx].astype(np.float32)
+                alpha = float(alphas[idx])
+                meta = metadata_records[idx]
+
+                if args.dataset == 'single':
+                    latent_tensor = torch.from_numpy(latent_np).to(batch['masked_spectra'].dtype)
+                    batch['masked_spectra'][0] = latent_tensor
+                    if batch.get('features') is not None and isinstance(batch['features'], torch.Tensor):
+                        batch['features'][0] = latent_tensor
+                else:
+                    latent_tensor = torch.from_numpy(latent_np)
+                    if 'masked_spectra_a' in batch:
+                        batch['masked_spectra_a'][0] = latent_tensor
+
+                with torch.no_grad():
+                    gen_text, input_text, target_text, logps = model.generate_response_from_batch(
+                        batch_data=batch,
+                        batch_idx=0,
+                        tokenizer=tokenizer,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
+
+                record = {
+                    'dataset_index': dataset_idx,
+                    'alpha': alpha,
+                    'question': input_text,
+                    'true_answer': target_text,
+                    'generated_text': gen_text,
+                    'log_probs': logps,
+                    'metadata': {
+                        'obsid_a': meta.get('obsid_a'),
+                        'obsid_b': meta.get('obsid_b'),
+                        'star_a_physical_properties': extract_physical_properties(meta.get('star_a_params')),
+                        'star_b_physical_properties': extract_physical_properties(meta.get('star_b_params')),
+                        'partner_dataset_index': meta.get('partner_dataset_index'),
+                    },
+                }
+                fh.write(json.dumps(record) + '\n')
+
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
     print(f"Wrote evaluation results to {output_path}")
 

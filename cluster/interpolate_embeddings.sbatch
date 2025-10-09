@@ -104,6 +104,10 @@ srun --kill-on-bad-exit=1 \
     --batch_size "${BATCH_SIZE}" \
     --random_seed 42 \
     --features_file "${FEATURES_FILE}" \
-    --dataset "${DATASET}"
+    --dataset "${DATASET}" \
+    --alpha_sweep \
+    --alpha_start 0.0 \
+    --alpha_end 1.0 \
+    --alpha_step 0.1
 
 echo "Interpolation outputs written to ${OUTFILE}"

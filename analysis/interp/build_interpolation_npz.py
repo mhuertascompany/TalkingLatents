@@ -197,7 +197,7 @@ def main():
         for alpha in alphas:
             if len(latent_list) >= total_cap:
                 break
-            interp = latent_a + float(alpha) * latent_b
+            interp = (1.0 - float(alpha)) * latent_a + float(alpha) * latent_b
             latent_list.append(interp.astype(np.float32))
             dataset_indices.append(dataset_idx)
             alpha_list.append(float(alpha))
