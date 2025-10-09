@@ -155,7 +155,18 @@ def main():
 
         if args.dataset == 'single':
             latent_a = batch['masked_spectra'][0].cpu().numpy().astype(np.float32)
-            latent_b = np.zeros_like(latent_a, dtype=np.float32)
+            partner_idx = random.randrange(len(loader.dataset))
+            if len(loader.dataset) > 1:
+                while partner_idx == dataset_idx:
+                    partner_idx = random.randrange(len(loader.dataset))
+            partner_sample = loader.dataset[partner_idx]
+            partner_batch = single_collate_fn([partner_sample])
+            latent_b = partner_batch['masked_spectra'][0].cpu().numpy().astype(np.float32)
+
+            obsid_a = batch.get('obsids', [None])[0]
+            obsid_b = partner_batch.get('obsids', [None])[0]
+            star_a_params = make_jsonable(batch.get('stellar_data', [{}])[0])
+            star_b_params = make_jsonable(partner_batch.get('stellar_data', [{}])[0])
         else:
             if 'masked_spectra_a' in batch and 'masked_spectra_b' in batch:
                 latent_a = batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
@@ -170,12 +181,6 @@ def main():
                 latent_a = features[int(idx_a)].astype(np.float32)
                 latent_b = features[int(idx_b)].astype(np.float32)
 
-        if args.dataset == 'single':
-            obsid_a = batch.get('obsids', [None])[0]
-            obsid_b = None
-            star_a_params = make_jsonable(batch.get('stellar_data', [{}])[0])
-            star_b_params = None
-        else:
             obsid_info = batch.get('obsid', [None])[0]
             if isinstance(obsid_info, (list, tuple)):
                 obsid_a, obsid_b = obsid_info
@@ -196,14 +201,17 @@ def main():
             latent_list.append(interp.astype(np.float32))
             dataset_indices.append(dataset_idx)
             alpha_list.append(float(alpha))
-            metadata_records.append({
+            record = {
                 'dataset_index': dataset_idx,
                 'alpha': float(alpha),
                 'obsid_a': obsid_a,
                 'obsid_b': obsid_b,
                 'star_a_params': star_a_params,
                 'star_b_params': star_b_params,
-            })
+            }
+            if args.dataset == 'single':
+                record['partner_dataset_index'] = partner_idx
+            metadata_records.append(record)
 
     latents = np.stack(latent_list)
     dataset_indices = np.array(dataset_indices, dtype=np.int32)
