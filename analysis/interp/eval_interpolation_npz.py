@@ -3,9 +3,10 @@
 import argparse
 import json
 import os
+import re
 import socket
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Callable, Tuple, List
 
 import numpy as np
 import torch
@@ -55,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--alpha_sweep', action='store_true',
+                        help='Run a sweep of alpha values for each pair and output CSV blocks')
+    parser.add_argument('--alpha_start', type=float, default=0.0)
+    parser.add_argument('--alpha_end', type=float, default=1.0)
+    parser.add_argument('--alpha_step', type=float, default=0.1)
     return parser.parse_args()
 
 
@@ -106,6 +112,47 @@ def load_interpolations(npz_path: Path, metadata_path: Path):
     with open(metadata_path, 'r') as fh:
         meta_records = json.load(fh)['records']
     return latents, dataset_indices, alphas, meta_records
+
+
+def _prefer_value(params: dict, candidates: List[str]):
+    if not isinstance(params, dict):
+        return None
+    lowered = {k.lower(): k for k in params.keys()}
+    for cand in candidates:
+        if cand in lowered:
+            return params[lowered[cand]]
+    for key in params.keys():
+        low = key.lower()
+        for cand in candidates:
+            if cand in low:
+                return params[key]
+    return None
+
+
+def extract_star_params(params: dict):
+    teff = _prefer_value(params, ['teff', 'teff_k', 'teff_model_k'])
+    logg = _prefer_value(params, ['logg', 'logg_model'])
+    feh = _prefer_value(params, ['feh', '[fe/h]'])
+    return teff, logg, feh
+
+
+def parse_inferred_properties(text: str):
+    teff_match = re.search(r'teff\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    logg_match = re.search(r'log\s*g?\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    feh_match = re.search(r'(feh|\[fe/?h\])\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    teff = float(teff_match.group(1)) if teff_match else None
+    logg = float(logg_match.group(1)) if logg_match else None
+    feh = float(feh_match.group(2)) if feh_match else None
+    return teff, logg, feh
+
+
+def to_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device) -> MultimodalLlamaModelMultiTokens:
@@ -181,6 +228,8 @@ def load_eval_dataset(args: argparse.Namespace,
 
 def main():
     args = parse_args()
+    if args.alpha_sweep and args.dataset != 'single':
+        raise NotImplementedError("alpha_sweep is currently supported only for dataset='single'")
     device = setup_single_gpu(args.device)
 
     latents, dataset_indices, alphas, metadata_records = load_interpolations(
@@ -211,58 +260,159 @@ def main():
     with open(output_path, 'w') as fh:
         seen = set()
         written = 0
-        for idx in eval_indices:
-            meta = metadata_records[idx]
-            ds_idx = int(dataset_indices[idx])
-            partner_idx = meta.get('partner_dataset_index') if args.dataset == 'single' else meta.get('obsid_b')
-            key = (ds_idx, partner_idx)
-            if key in seen:
-                continue
-            seen.add(key)
 
-            sample = dataset[ds_idx]
-            batch = collate_fn([sample])
+        def select_unique_indices():
+            for idx in eval_indices:
+                meta = metadata_records[idx]
+                ds_idx = int(dataset_indices[idx])
+                partner_idx = meta.get('partner_dataset_index') if args.dataset == 'single' else meta.get('obsid_b')
+                key = (ds_idx, partner_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield idx, ds_idx, partner_idx, meta
 
-            latent_np = latents[idx].astype(np.float32)
-            alpha = float(alphas[idx])
+        if args.alpha_sweep:
+            if args.alpha_step <= 0:
+                raise ValueError("alpha_step must be positive when using alpha_sweep")
+            sweep_alphas = np.arange(args.alpha_start, args.alpha_end + 1e-8, args.alpha_step)
+            if sweep_alphas.size == 0:
+                raise ValueError("No alpha values generated; adjust alpha_start/end/step")
 
-            if args.dataset == 'single':
-                latent_tensor = torch.from_numpy(latent_np).to(batch['masked_spectra'].dtype)
-                batch['masked_spectra'][0] = latent_tensor
-                if batch.get('features') is not None and isinstance(batch['features'], torch.Tensor):
-                    batch['features'][0] = latent_tensor
-            else:
-                latent_tensor = torch.from_numpy(latent_np)
-                if 'masked_spectra_a' in batch:
-                    batch['masked_spectra_a'][0] = latent_tensor
+            for idx, ds_idx, partner_idx, meta in select_unique_indices():
+                sample = dataset[ds_idx]
+                batch_a = collate_fn([sample])
 
-            with torch.no_grad():
-                gen_text, input_text, target_text, logps = model.generate_response_from_batch(
-                    batch_data=batch,
-                    batch_idx=0,
-                    tokenizer=tokenizer,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
+                if args.dataset != 'single':
+                    base_batch = collate_fn([sample])
+                    latent_a = base_batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
+                    latent_b = base_batch['masked_spectra_b'][0].cpu().numpy().astype(np.float32)
+                else:
+                    if partner_idx is None:
+                        raise ValueError("Metadata missing partner_dataset_index for single dataset sweep")
+                    partner_sample = dataset[partner_idx]
+                    batch_b = collate_fn([partner_sample])
+                    latent_a = batch_a['masked_spectra'][0].cpu().numpy().astype(np.float32)
+                    latent_b = batch_b['masked_spectra'][0].cpu().numpy().astype(np.float32)
+
+                star_a_params = meta.get('star_a_params', {}) or {}
+                star_b_params = meta.get('star_b_params', {}) or {}
+                teff_a, logg_a, feh_a = extract_star_params(star_a_params)
+                teff_b, logg_b, feh_b = extract_star_params(star_b_params)
+                teff_a, logg_a, feh_a = to_float(teff_a), to_float(logg_a), to_float(feh_a)
+                teff_b, logg_b, feh_b = to_float(teff_b), to_float(logg_b), to_float(feh_b)
+
+                fh.write(
+                    f"# dataset_index={ds_idx}, partner_index={partner_idx}, "
+                    f"obsid_a={meta.get('obsid_a')}, obsid_b={meta.get('obsid_b')}\n"
+                )
+                fh.write(
+                    "alpha,inferred_teff,inferred_logg,inferred_feh,"
+                    "star_a_teff,star_a_logg,star_a_feh,"
+                    "star_b_teff,star_b_logg,star_b_feh,generated_text\n"
                 )
 
-            record = {
-                'dataset_index': ds_idx,
-                'alpha': alpha,
-                'question': input_text,
-                'true_answer': target_text,
-                'generated_text': gen_text,
-                'log_probs': logps,
-                'metadata': meta,
-            }
-            fh.write(json.dumps(record) + '\n')
+                for alpha in sweep_alphas:
+                    interp = (1.0 - alpha) * latent_a + alpha * latent_b
+                    latent_tensor = torch.from_numpy(interp.astype(np.float32)).to(device)
 
-            written += 1
-            if written >= args.num_samples:
-                break
+                    batch_use = {
+                        'input_ids': batch_a['input_ids'].to(device),
+                        'target_ids': batch_a['target_ids'].to(device),
+                        'feature_start_indices': batch_a['feature_start_indices'].to(device),
+                        'answer_start_indices': batch_a['answer_start_indices'].to(device),
+                        'input_texts': batch_a.get('input_texts', ['']),
+                        'target_texts': batch_a.get('target_texts', ['']),
+                        'masked_spectra': latent_tensor.unsqueeze(0),
+                    }
 
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        gen_text, input_text, target_text, _ = model.generate_response_from_batch(
+                            batch_data=batch_use,
+                            batch_idx=0,
+                            tokenizer=tokenizer,
+                            max_new_tokens=args.max_new_tokens,
+                            temperature=args.temperature,
+                            top_p=args.top_p,
+                        )
+
+                    pred_teff, pred_logg, pred_feh = parse_inferred_properties(gen_text)
+
+                    def fmt(val):
+                        if val is None:
+                            return ''
+                        if abs(val) >= 100:
+                            return f"{val:.1f}"
+                        return f"{val:.3f}"
+
+                    row = [
+                        f"{alpha:.2f}",
+                        fmt(pred_teff),
+                        fmt(pred_logg),
+                        fmt(pred_feh),
+                        fmt(teff_a),
+                        fmt(logg_a),
+                        fmt(feh_a),
+                        fmt(teff_b),
+                        fmt(logg_b),
+                        fmt(feh_b),
+                        json.dumps(gen_text.strip()),
+                    ]
+                    fh.write(','.join(row) + '\n')
+
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+
+                fh.write('\n')
+
+                written += 1
+                if written >= args.num_samples:
+                    break
+        else:
+            for idx, ds_idx, partner_idx, meta in select_unique_indices():
+                sample = dataset[ds_idx]
+                batch = collate_fn([sample])
+
+                latent_np = latents[idx].astype(np.float32)
+                alpha = float(alphas[idx])
+
+                if args.dataset == 'single':
+                    latent_tensor = torch.from_numpy(latent_np).to(batch['masked_spectra'].dtype)
+                    batch['masked_spectra'][0] = latent_tensor
+                    if batch.get('features') is not None and isinstance(batch['features'], torch.Tensor):
+                        batch['features'][0] = latent_tensor
+                else:
+                    latent_tensor = torch.from_numpy(latent_np)
+                    if 'masked_spectra_a' in batch:
+                        batch['masked_spectra_a'][0] = latent_tensor
+
+                with torch.no_grad():
+                    gen_text, input_text, target_text, logps = model.generate_response_from_batch(
+                        batch_data=batch,
+                        batch_idx=0,
+                        tokenizer=tokenizer,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
+
+                record = {
+                    'dataset_index': ds_idx,
+                    'alpha': alpha,
+                    'question': input_text,
+                    'true_answer': target_text,
+                    'generated_text': gen_text,
+                    'log_probs': logps,
+                    'metadata': meta,
+                }
+                fh.write(json.dumps(record) + '\n')
+
+                written += 1
+                if written >= args.num_samples:
+                    break
+
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
     print(f"Wrote evaluation results to {output_path}")
 
