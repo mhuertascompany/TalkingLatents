@@ -37,6 +37,7 @@ EXP=${EXP:-interp_run}
 SPLIT=${SPLIT:-val}
 BUILD_NUM_SAMPLES=${BUILD_NUM_SAMPLES:-100}
 ALPHAS_PER_SAMPLE=${ALPHAS_PER_SAMPLE:-5}
+ALPHAS=${ALPHAS:-}
 MAX_TOTAL=${MAX_TOTAL:-0}
 EVAL_NUM_SAMPLES=${EVAL_NUM_SAMPLES:-25}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-120}
@@ -53,11 +54,15 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-REBUILD=${REBUILD:-0}
+REBUILD=${REBUILD:-1}
 if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
   LIMIT_ARG=()
   if [[ "${MAX_TOTAL}" != "0" ]]; then
     LIMIT_ARG=(--max_total "${MAX_TOTAL}")
+  fi
+  EXTRA_ALPHA=()
+  if [[ -n "${ALPHAS}" ]]; then
+    EXTRA_ALPHA=(--alphas "${ALPHAS}")
   fi
 
   srun --kill-on-bad-exit=1 \
@@ -73,7 +78,8 @@ if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
       --build_num_samples "${BUILD_NUM_SAMPLES}" \
       --alphas_per_sample "${ALPHAS_PER_SAMPLE}" \
       --random_seed 42 \
-      "${LIMIT_ARG[@]}"
+      "${LIMIT_ARG[@]}" \
+      "${EXTRA_ALPHA[@]}"
 fi
 
 srun --kill-on-bad-exit=1 \

@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
                         help='Number of random α values in [-1,1] per dataset row')
     parser.add_argument('--max_total', type=int, default=None,
                         help='Optional hard cap on total interpolations written to NPZ')
+    parser.add_argument('--alphas', type=str, default=None,
+                        help='Optional comma/space separated list of alpha values to use instead of random sampling')
     parser.add_argument('--train_ratio', type=float, default=0.8)
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.1)
@@ -101,6 +103,13 @@ def main():
 
     total_cap = args.max_total if args.max_total is not None else float('inf')
 
+    alpha_values = None
+    if args.alphas:
+        raw = args.alphas.replace(',', ' ').split()
+        if not raw:
+            raise ValueError('Provided --alphas is empty after parsing')
+        alpha_values = [float(val) for val in raw]
+
     for dataset_idx in selected_indices:
         if len(latent_list) >= total_cap:
             break
@@ -132,7 +141,10 @@ def main():
         star_a_params = make_jsonable(batch.get('star_a_params', [{}])[0])
         star_b_params = make_jsonable(batch.get('star_b_params', [{}])[0])
 
-        alphas = np.random.uniform(-1.0, 1.0, size=args.alphas_per_sample)
+        if alpha_values is not None:
+            alphas = alpha_values
+        else:
+            alphas = np.random.uniform(-1.0, 1.0, size=args.alphas_per_sample)
         for alpha in alphas:
             if len(latent_list) >= total_cap:
                 break
