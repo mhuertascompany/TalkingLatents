@@ -5,6 +5,7 @@ import json
 import os
 import socket
 from pathlib import Path
+from typing import Callable, Tuple
 
 import numpy as np
 import torch
@@ -18,6 +19,9 @@ if str(ROOT) not in sys.path:
 from llama3.llama.tokenizer import Tokenizer
 from nn.llm_multi import MultimodalLlamaModelMultiTokens
 from src.simple_questions import _load_llm_model, get_model_path
+from data.dataset_interpert import create_stellar_dataloaders, collate_fn as single_collate_fn
+from data.dataset_comparative import create_comparative_dataloaders, collate_comparative_fn
+from data.transforms import Compose, GeneralSpectrumPreprocessor, ToTensor
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,8 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num_samples', type=int, default=25,
                         help='Number of interpolated latents to evaluate')
     parser.add_argument('--random_seed', type=int, default=42)
+    parser.add_argument('--features_file', type=str, default=None,
+                        help='Optional features.npy used during training/evaluation')
     parser.add_argument('--max_seq_length', type=int, default=128,
                         help='Maximum sequence length expected by the base LLM')
+    parser.add_argument('--dataset', choices=['single', 'comparative'], default='comparative')
+    parser.add_argument('--train_ratio', type=float, default=0.8)
+    parser.add_argument('--val_ratio', type=float, default=0.1)
+    parser.add_argument('--test_ratio', type=float, default=0.1)
+    parser.add_argument('--num_workers', type=int, default=0)
     return parser.parse_args()
 
 
@@ -72,7 +83,6 @@ def setup_single_gpu(device_str: str) -> torch.device:
         try:
             dist.init_process_group('gloo', rank=0, world_size=1)
         except Exception as exc:
-            # Retry once with a freshly allocated port if binding failed
             if 'Address already in use' in str(exc):
                 os.environ['MASTER_PORT'] = str(_find_free_port())
                 dist.init_process_group('gloo', rank=0, world_size=1)
@@ -120,10 +130,59 @@ def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device)
     return model
 
 
-def encode_prompt(tokenizer: Tokenizer) -> torch.Tensor:
+def encode_prompt(tokenizer: Tokenizer) -> Tuple[str, torch.Tensor]:
     prompt = "Describe the physical properties of this star."
     tokens = tokenizer.encode(prompt, bos=True, eos=False)
     return prompt, torch.tensor([tokens], dtype=torch.long)
+
+
+def load_eval_dataset(args: argparse.Namespace,
+                      tokenizer_path: str,
+                      features: np.ndarray | None) -> Tuple[torch.utils.data.Dataset, Callable]:
+    transforms = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
+    split_root = Path(args.split_cache_root)
+    split_root.mkdir(parents=True, exist_ok=True)
+
+    if args.dataset == 'single':
+        cache_dir = split_root / 'single' / Path(args.json_file).stem
+        train_dl, val_dl, test_dl = create_stellar_dataloaders(
+            json_file=args.json_file,
+            features_array=features,
+            spectral_transforms=transforms,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            random_state=args.random_seed,
+            num_spectral_features=args.num_spectral_features,
+            cache_dir=str(cache_dir),
+            allow_new_splits=False,
+            tokenizer_path=tokenizer_path,
+            max_length=args.max_seq_length,
+            batch_size=1,
+            num_workers=args.num_workers,
+        )
+        loaders = {'train': train_dl, 'val': val_dl, 'test': test_dl}
+        return loaders[args.split].dataset, single_collate_fn
+
+    comp_json = args.comparative_json_file or args.json_file
+    cache_dir = split_root / 'comparative' / Path(comp_json).stem
+    train_dl, val_dl, test_dl = create_comparative_dataloaders(
+        json_file=comp_json,
+        features_array=features,
+        batch_size=1,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        random_state=args.random_seed,
+        num_workers=args.num_workers,
+        cache_dir=str(cache_dir),
+        tokenizer_path=tokenizer_path,
+        max_length=args.max_seq_length,
+        num_stellar_features=args.num_spectral_features,
+        allow_new_splits=False,
+    )
+    loaders = {'train': train_dl, 'val': val_dl, 'test': test_dl}
+    return loaders[args.split].dataset, collate_comparative_fn
 
 
 def main():
@@ -146,30 +205,35 @@ def main():
     num_eval = min(args.num_samples, total)
     eval_indices = rng.choice(total, size=num_eval, replace=False)
 
+    features_array = None
+    if args.features_file and os.path.exists(args.features_file):
+        features_array = np.load(args.features_file)
+
+    dataset, collate_fn = load_eval_dataset(args, tokenizer_path, features_array)
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'w') as fh:
         for i in eval_indices:
-            latent = torch.from_numpy(latents[i]).unsqueeze(0).to(device)
+            dataset_idx = int(dataset_indices[i])
+            sample = dataset[dataset_idx]
+            batch = collate_fn([sample])
+
+            latent_np = latents[i].astype(np.float32)
             alpha = float(alphas[i])
             meta = metadata_records[i]
 
-            prompt_text, input_ids = encode_prompt(tokenizer)
-            input_ids = input_ids.to(device)
-            target_ids = torch.full_like(input_ids, -100)
-            feature_start_indices = torch.tensor([0], dtype=torch.long, device=device)
-            answer_start_indices = torch.tensor([input_ids.size(1)], dtype=torch.long, device=device)
-
-            batch = {
-                'input_ids': input_ids,
-                'target_ids': target_ids,
-                'feature_start_indices': feature_start_indices,
-                'answer_start_indices': answer_start_indices,
-                'masked_spectra': latent,
-                'input_texts': [prompt_text],
-                'target_texts': [''],
-            }
+            if args.dataset == 'single':
+                latent_tensor = torch.from_numpy(latent_np).to(batch['masked_spectra'].dtype)
+                batch['masked_spectra'][0] = latent_tensor
+                if batch.get('features') is not None and isinstance(batch['features'], torch.Tensor):
+                    batch['features'][0] = latent_tensor
+            else:
+                # Two-star interpolation currently replaces Star A latent only
+                latent_tensor = torch.from_numpy(latent_np)
+                if 'masked_spectra_a' in batch:
+                    batch['masked_spectra_a'][0] = latent_tensor
 
             with torch.no_grad():
                 gen_text, input_text, target_text, logps = model.generate_response_from_batch(
@@ -182,9 +246,9 @@ def main():
                 )
 
             record = {
-                'dataset_index': int(dataset_indices[i]),
+                'dataset_index': dataset_idx,
                 'alpha': alpha,
-                'question': prompt_text,
+                'question': input_text,
                 'true_answer': target_text,
                 'generated_text': gen_text,
                 'log_probs': logps,
@@ -192,7 +256,6 @@ def main():
             }
             fh.write(json.dumps(record) + '\n')
 
-            del batch, latent, input_ids
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
 

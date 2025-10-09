@@ -102,6 +102,8 @@ srun --kill-on-bad-exit=1 \
     --num_spectral_features 8 \
     --max_seq_length 128 \
     --batch_size "${BATCH_SIZE}" \
-    --random_seed 42
+    --random_seed 42 \
+    --features_file "${FEATURES_FILE}" \
+    --dataset "${DATASET}"
 
 echo "Interpolation outputs written to ${OUTFILE}"
