@@ -39,7 +39,7 @@ BUILD_NUM_SAMPLES=${BUILD_NUM_SAMPLES:-100}
 ALPHAS_PER_SAMPLE=${ALPHAS_PER_SAMPLE:-5}
 ALPHAS=${ALPHAS:-0.5}
 MAX_TOTAL=${MAX_TOTAL:-0}
-EVAL_NUM_SAMPLES=${EVAL_NUM_SAMPLES:-2}
+EVAL_NUM_SAMPLES=${EVAL_NUM_SAMPLES:-25}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-120}
 TEMPERATURE=${TEMPERATURE:-0.0}
 TOPP=${TOPP:-0.0}
@@ -104,10 +104,6 @@ srun --kill-on-bad-exit=1 \
     --batch_size "${BATCH_SIZE}" \
     --random_seed 42 \
     --features_file "${FEATURES_FILE}" \
-    --dataset "${DATASET}" \
-    --alpha_sweep \
-    --alpha_start 0.0 \
-    --alpha_end 1.0 \
-    --alpha_step 0.1
+    --dataset "${DATASET}"
 
 echo "Interpolation outputs written to ${OUTFILE}"
