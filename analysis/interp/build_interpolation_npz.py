@@ -109,6 +109,7 @@ def main():
         if not raw:
             raise ValueError('Provided --alphas is empty after parsing')
         alpha_values = [float(val) for val in raw]
+        print(f"Using explicit alpha values: {alpha_values}")
 
     for dataset_idx in selected_indices:
         if len(latent_list) >= total_cap:
