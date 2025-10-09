@@ -124,14 +124,18 @@ def main():
                 return int(val[0])
             return int(val)
 
-        if 'features_a_indices' in batch:
-            idx_a = to_index(batch['features_a_indices'][0])
-            idx_b = to_index(batch['features_b_indices'][0])
+        if 'masked_spectra_a' in batch and 'masked_spectra_b' in batch:
+            latent_a = batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
+            latent_b = batch['masked_spectra_b'][0].cpu().numpy().astype(np.float32)
         else:
-            idx_a = to_index(batch.get('star_a_df_index', [0])[0])
-            idx_b = to_index(batch.get('star_b_df_index', [0])[0])
-        latent_a = features[int(idx_a)]
-        latent_b = features[int(idx_b)]
+            if 'features_a_indices' in batch:
+                idx_a = to_index(batch['features_a_indices'][0])
+                idx_b = to_index(batch['features_b_indices'][0])
+            else:
+                idx_a = to_index(batch.get('star_a_df_index', [0])[0])
+                idx_b = to_index(batch.get('star_b_df_index', [0])[0])
+            latent_a = features[int(idx_a)].astype(np.float32)
+            latent_b = features[int(idx_b)].astype(np.float32)
 
         obsid_info = batch.get('obsid', [None])[0]
         if isinstance(obsid_info, (list, tuple)):
