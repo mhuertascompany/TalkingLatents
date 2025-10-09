@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from data.dataset_comparative import create_comparative_dataloaders, collate_comparative_fn
+from data.dataset_interpert import create_stellar_dataloaders, collate_fn as single_collate_fn
 from data.transforms import Compose, GeneralSpectrumPreprocessor, ToTensor
 
 
@@ -40,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--llm_path', type=str, default=None,
                         help='Unused but kept for CLI symmetry')
     parser.add_argument('--split', choices=['train', 'val', 'test'], default='val')
+    parser.add_argument('--dataset', choices=['comparative', 'single'], default='comparative',
+                        help='Which dataset type to draw samples from when building NPZ')
     parser.add_argument('--build_num_samples', type=int, default=100,
                         help='How many dataset rows to interpolate before random sub-sampling')
     parser.add_argument('--alphas_per_sample', type=int, default=5,
@@ -59,24 +62,47 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_loader(args: argparse.Namespace, tokenizer_path: str, features: np.ndarray):
-    comp_json = args.comparative_json_file or args.json_file
     transforms = Compose([GeneralSpectrumPreprocessor(rv_norm=True), ToTensor()])
-    train_dl, val_dl, test_dl = create_comparative_dataloaders(
-        json_file=comp_json,
-        features_array=features,
-        batch_size=1,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        random_state=args.random_seed,
-        num_workers=args.num_workers,
-        cache_dir=str(Path(args.split_cache_root) / 'comparative' / Path(comp_json).stem),
-        tokenizer_path=tokenizer_path,
-        max_length=args.max_seq_length,
-        num_stellar_features=args.num_spectral_features,
-        allow_new_splits=False,
-    )
-    return {'train': train_dl, 'val': val_dl, 'test': test_dl}[args.split]
+
+    if args.dataset == 'single':
+        cache_base = Path(args.split_cache_root) / 'single' / Path(args.json_file).stem
+        train_dl, val_dl, test_dl = create_stellar_dataloaders(
+            json_file=args.json_file,
+            features_array=features,
+            spectral_transforms=transforms,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            random_state=args.random_seed,
+            num_spectral_features=args.num_spectral_features,
+            cache_dir=str(cache_base),
+            allow_new_splits=False,
+            tokenizer_path=tokenizer_path,
+            max_length=args.max_seq_length,
+            batch_size=1,
+            num_workers=args.num_workers,
+        )
+    else:
+        comp_json = args.comparative_json_file or args.json_file
+        cache_base = Path(args.split_cache_root) / 'comparative' / Path(comp_json).stem
+        train_dl, val_dl, test_dl = create_comparative_dataloaders(
+            json_file=comp_json,
+            features_array=features,
+            batch_size=1,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            random_state=args.random_seed,
+            num_workers=args.num_workers,
+            cache_dir=str(cache_base),
+            tokenizer_path=tokenizer_path,
+            max_length=args.max_seq_length,
+            num_stellar_features=args.num_spectral_features,
+            allow_new_splits=False,
+        )
+
+    loaders = {'train': train_dl, 'val': val_dl, 'test': test_dl}
+    return loaders[args.split]
 
 
 def main():
@@ -115,7 +141,10 @@ def main():
         if len(latent_list) >= total_cap:
             break
         sample = loader.dataset[dataset_idx]
-        batch = collate_comparative_fn([sample])
+        if args.dataset == 'single':
+            batch = single_collate_fn([sample])
+        else:
+            batch = collate_comparative_fn([sample])
 
         def to_index(val):
             if isinstance(val, torch.Tensor):
@@ -124,27 +153,37 @@ def main():
                 return int(val[0])
             return int(val)
 
-        if 'masked_spectra_a' in batch and 'masked_spectra_b' in batch:
-            latent_a = batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
-            latent_b = batch['masked_spectra_b'][0].cpu().numpy().astype(np.float32)
+        if args.dataset == 'single':
+            latent_a = batch['masked_spectra'][0].cpu().numpy().astype(np.float32)
+            latent_b = np.zeros_like(latent_a, dtype=np.float32)
         else:
-            if 'features_a_indices' in batch:
-                idx_a = to_index(batch['features_a_indices'][0])
-                idx_b = to_index(batch['features_b_indices'][0])
+            if 'masked_spectra_a' in batch and 'masked_spectra_b' in batch:
+                latent_a = batch['masked_spectra_a'][0].cpu().numpy().astype(np.float32)
+                latent_b = batch['masked_spectra_b'][0].cpu().numpy().astype(np.float32)
             else:
-                idx_a = to_index(batch.get('star_a_df_index', [0])[0])
-                idx_b = to_index(batch.get('star_b_df_index', [0])[0])
-            latent_a = features[int(idx_a)].astype(np.float32)
-            latent_b = features[int(idx_b)].astype(np.float32)
+                if 'features_a_indices' in batch:
+                    idx_a = to_index(batch['features_a_indices'][0])
+                    idx_b = to_index(batch['features_b_indices'][0])
+                else:
+                    idx_a = to_index(batch.get('star_a_df_index', [0])[0])
+                    idx_b = to_index(batch.get('star_b_df_index', [0])[0])
+                latent_a = features[int(idx_a)].astype(np.float32)
+                latent_b = features[int(idx_b)].astype(np.float32)
 
-        obsid_info = batch.get('obsid', [None])[0]
-        if isinstance(obsid_info, (list, tuple)):
-            obsid_a, obsid_b = obsid_info
+        if args.dataset == 'single':
+            obsid_a = batch.get('obsids', [None])[0]
+            obsid_b = None
+            star_a_params = make_jsonable(batch.get('stellar_data', [{}])[0])
+            star_b_params = None
         else:
-            obsid_a, obsid_b = obsid_info, None
+            obsid_info = batch.get('obsid', [None])[0]
+            if isinstance(obsid_info, (list, tuple)):
+                obsid_a, obsid_b = obsid_info
+            else:
+                obsid_a, obsid_b = obsid_info, None
 
-        star_a_params = make_jsonable(batch.get('star_a_params', [{}])[0])
-        star_b_params = make_jsonable(batch.get('star_b_params', [{}])[0])
+            star_a_params = make_jsonable(batch.get('star_a_params', [{}])[0])
+            star_b_params = make_jsonable(batch.get('star_b_params', [{}])[0])
 
         if alpha_values is not None:
             alphas = alpha_values

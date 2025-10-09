@@ -47,6 +47,7 @@ NPZ_PATH=${NPZ_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.npz}
 META_PATH=${META_PATH:-${OUTPUT_DIR}/${EXP}_${SPLIT}.metadata.json}
 OUTFILE=${OUTPUT_DIR}/${EXP}_${SPLIT}.jsonl
 BATCH_SIZE=${BATCH_SIZE:-1}
+DATASET=${DATASET:-single}
 
 if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
   echo "ERROR: RESUME checkpoint not found. Set RESUME to a valid *_resume_last.pth path." >&2
@@ -78,6 +79,7 @@ if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
       --build_num_samples "${BUILD_NUM_SAMPLES}" \
       --alphas_per_sample "${ALPHAS_PER_SAMPLE}" \
       --random_seed 42 \
+      --dataset "${DATASET}" \
       "${LIMIT_ARG[@]}" \
       "${EXTRA_ALPHA[@]}"
 fi
