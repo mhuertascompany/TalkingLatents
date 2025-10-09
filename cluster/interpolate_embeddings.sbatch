@@ -26,7 +26,10 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 JSON_FILE=${JSON_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/stellar_descriptions_questions_short.json}
 COMP_JSON_FILE=${COMP_JSON_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/comparative_dataset.json}
 FEATURES_FILE=${FEATURES_FILE:-/lustre/fswork/projects/rech/oxl/utl47bv/data/features.npy}
-RESUME=${RESUME:-$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_last.pth 2>/dev/null | head -1 || true)}
+RESUME=${RESUME:-$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_best.pth 2>/dev/null | head -1 || true)}
+if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
+  RESUME=$(ls -t logs/train_multitok_ddp/*/llm_multitok_resume_last.pth 2>/dev/null | head -1 || true)
+fi
 SPLIT_CACHE_ROOT=${SPLIT_CACHE_ROOT:-logs/split_cache}
 LLM_PATH=${LLM_PATH:-/lustre/fsmisc/dataset/HuggingFace_Models/meta-llama/Meta-Llama-3.1-8B/original}
 OUTPUT_DIR=${OUTPUT_DIR:-logs/interp}
