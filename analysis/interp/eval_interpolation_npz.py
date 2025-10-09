@@ -116,6 +116,7 @@ def main():
     tokenizer = Tokenizer(model_path=str(tokenizer_path))
 
     model = build_model(args, latent_dim, device)
+    print(f"Loaded MultimodalLlamaModelMultiTokens from {args.resume_path}")
 
     rng = np.random.default_rng(args.random_seed)
     total = latents.shape[0]
