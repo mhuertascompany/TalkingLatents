@@ -162,6 +162,7 @@ def parse_inferred_properties(text: str):
             r'teff[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
             r't[_\-\s]*eff[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
             r'effective\s+temperature[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+            r'temperature[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
         ]
     )
     logg = _search_value(
