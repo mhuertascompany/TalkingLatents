@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--alpha_start', type=float, default=0.0)
     parser.add_argument('--alpha_end', type=float, default=1.0)
     parser.add_argument('--alpha_step', type=float, default=0.1)
+    parser.add_argument('--csv_output', type=str, default=None,
+                        help='Optional path for flat CSV with numeric sweep values')
     return parser.parse_args()
 
 
@@ -158,6 +160,7 @@ def parse_inferred_properties(text: str):
         normalized,
         [
             r'teff[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+            r't[_\-\s]*eff[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
             r'effective\s+temperature[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
         ]
     )
@@ -185,6 +188,15 @@ def to_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def format_numeric(value: float, decimals: int = 6) -> str:
+    if value is None:
+        return ''
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (TypeError, ValueError):
+        return ''
 
 
 def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device) -> MultimodalLlamaModelMultiTokens:
@@ -289,6 +301,18 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    csv_file = None
+    if args.alpha_sweep:
+        csv_path = Path(args.csv_output) if args.csv_output else output_path.parent / f"{output_path.name}.values.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_file = csv_path.open('w')
+        csv_file.write(
+            "dataset_index,partner_index,alpha,"
+            "inferred_teff,inferred_logg,inferred_feh,"
+            "star_a_teff,star_a_logg,star_a_feh,"
+            "star_b_teff,star_b_logg,star_b_feh\n"
+        )
+
     with open(output_path, 'w') as fh:
         seen = set()
         written = 0
@@ -392,6 +416,23 @@ def main():
                     ]
                     fh.write(','.join(row) + '\n')
 
+                    if csv_file:
+                        csv_row = [
+                            str(ds_idx),
+                            '' if partner_idx is None else str(partner_idx),
+                            f"{alpha:.2f}",
+                            format_numeric(pred_teff),
+                            format_numeric(pred_logg),
+                            format_numeric(pred_feh),
+                            format_numeric(teff_a),
+                            format_numeric(logg_a),
+                            format_numeric(feh_a),
+                            format_numeric(teff_b),
+                            format_numeric(logg_b),
+                            format_numeric(feh_b),
+                        ]
+                        csv_file.write(','.join(csv_row) + '\n')
+
                     if device.type == 'cuda':
                         torch.cuda.empty_cache()
 
@@ -447,6 +488,8 @@ def main():
                     torch.cuda.empty_cache()
 
     print(f"Wrote evaluation results to {output_path}")
+    if csv_file:
+        csv_file.close()
 
 
 if __name__ == '__main__':
