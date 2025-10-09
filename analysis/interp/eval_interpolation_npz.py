@@ -108,6 +108,22 @@ def load_interpolations(npz_path: Path, metadata_path: Path):
     return latents, dataset_indices, alphas, meta_records
 
 
+_PHYS_PROP_SUBSTRINGS = (
+    'teff', 'logg', 'feh', 'age', 'mass', 'radius', 'luminosity', 'stage', 'rv'
+)
+
+
+def extract_physical_properties(params):
+    if not isinstance(params, dict):
+        return None
+    result = {}
+    for key, value in params.items():
+        key_lower = key.lower()
+        if any(substr in key_lower for substr in _PHYS_PROP_SUBSTRINGS):
+            result[key] = value
+    return result or None
+
+
 def build_model(args: argparse.Namespace, latent_dim: int, device: torch.device) -> MultimodalLlamaModelMultiTokens:
     llm = _load_llm_model(args)
     llm = llm.to(device)
@@ -252,7 +268,13 @@ def main():
                 'true_answer': target_text,
                 'generated_text': gen_text,
                 'log_probs': logps,
-                'metadata': meta,
+                'metadata': {
+                    'obsid_a': meta.get('obsid_a'),
+                    'obsid_b': meta.get('obsid_b'),
+                    'star_a_physical_properties': extract_physical_properties(meta.get('star_a_params')),
+                    'star_b_physical_properties': extract_physical_properties(meta.get('star_b_params')),
+                    'partner_dataset_index': meta.get('partner_dataset_index'),
+                },
             }
             fh.write(json.dumps(record) + '\n')
 
