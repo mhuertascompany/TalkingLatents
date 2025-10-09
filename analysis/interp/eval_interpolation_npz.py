@@ -113,7 +113,7 @@ def main():
     latent_dim = latents.shape[1]
 
     model_path, tokenizer_path = get_model_path(args)
-    tokenizer = Tokenizer(model_path=Path(tokenizer_path))
+    tokenizer = Tokenizer(model_path=str(tokenizer_path))
 
     model = build_model(args, latent_dim, device)
 

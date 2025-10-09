@@ -50,7 +50,7 @@ if [[ -z "${RESUME}" || ! -f "${RESUME}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-REBUILD=${REBUILD:-1}
+REBUILD=${REBUILD:-0}
 if [[ "${REBUILD}" == "1" || ! -f "${NPZ_PATH}" ]]; then
   LIMIT_ARG=()
   if [[ "${MAX_TOTAL}" != "0" ]]; then
