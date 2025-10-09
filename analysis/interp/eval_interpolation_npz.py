@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num_samples', type=int, default=25,
                         help='Number of interpolated latents to evaluate')
     parser.add_argument('--random_seed', type=int, default=42)
+    parser.add_argument('--max_seq_length', type=int, default=128,
+                        help='Maximum sequence length expected by the base LLM')
     return parser.parse_args()
 
 
