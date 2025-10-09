@@ -136,13 +136,45 @@ def extract_star_params(params: dict):
     return teff, logg, feh
 
 
+def _search_value(text: str, patterns: List[str]):
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            start = match.start()
+            window = text[max(0, start - 10):start].lower()
+            if 'sun' in window or 'solar' in window:
+                continue
+            try:
+                return float(match.group(1))
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def parse_inferred_properties(text: str):
-    teff_match = re.search(r'teff\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
-    logg_match = re.search(r'log\s*g?\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
-    feh_match = re.search(r'(feh|\[fe/?h\])\s*[:=]\s*([-+]?\d+(?:\.\d+)?)', text, re.IGNORECASE)
-    teff = float(teff_match.group(1)) if teff_match else None
-    logg = float(logg_match.group(1)) if logg_match else None
-    feh = float(feh_match.group(2)) if feh_match else None
+    normalized = re.sub(r'(\d)\.\s+(\d)', r'\1.\2', text)
+    normalized = re.sub(r'(\d)\s+K', r'\1K', normalized, flags=re.IGNORECASE)
+
+    teff = _search_value(
+        normalized,
+        [
+            r'teff[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+            r'effective\s+temperature[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+        ]
+    )
+    logg = _search_value(
+        normalized,
+        [
+            r'log\s*g[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+            r'surface\s+gravity[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+        ]
+    )
+    feh = _search_value(
+        normalized,
+        [
+            r'(?:feh|\[fe/?h\])[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+            r'metallicity[^\d\-+]{0,15}([-+]?\d+(?:\.\d+)?)',
+        ]
+    )
     return teff, logg, feh
 
 
