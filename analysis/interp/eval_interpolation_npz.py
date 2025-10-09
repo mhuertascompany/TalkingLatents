@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import socket
 from pathlib import Path
 
 import numpy as np
@@ -46,15 +47,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _find_free_port(preferred: int = 29500) -> int:
+    """Pick an available port, preferring the suggested one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('', preferred))
+            return preferred
+        except OSError:
+            sock.bind(('', 0))
+            return sock.getsockname()[1]
+
+
 def setup_single_gpu(device_str: str) -> torch.device:
     if device_str != 'cuda':
         return torch.device(device_str)
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA device required')
     os.environ.setdefault('MASTER_ADDR', '127.0.0.1')
-    os.environ.setdefault('MASTER_PORT', '29500')
+    current_port = int(os.environ.get('MASTER_PORT', 29500))
+    free_port = _find_free_port(current_port)
+    os.environ['MASTER_PORT'] = str(free_port)
     if not dist.is_initialized():
-        dist.init_process_group('gloo', rank=0, world_size=1)
+        try:
+            dist.init_process_group('gloo', rank=0, world_size=1)
+        except Exception as exc:
+            # Retry once with a freshly allocated port if binding failed
+            if 'Address already in use' in str(exc):
+                os.environ['MASTER_PORT'] = str(_find_free_port())
+                dist.init_process_group('gloo', rank=0, world_size=1)
+            else:
+                raise
     try:
         import fairscale.nn.model_parallel.initialize as fs_init
         if not fs_init.model_parallel_is_initialized():
