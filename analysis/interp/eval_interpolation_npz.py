@@ -353,7 +353,7 @@ def main():
                 fh.write(
                     "alpha,inferred_teff,inferred_logg,inferred_feh,"
                     "star_a_teff,star_a_logg,star_a_feh,"
-                    "star_b_teff,star_b_logg,star_b_feh\n"
+                    "star_b_teff,star_b_logg,star_b_feh,raw_output\n"
                 )
 
                 for alpha in sweep_alphas:
@@ -374,7 +374,10 @@ def main():
                             top_p=args.top_p,
                         )
 
-                    pred_teff, pred_logg, pred_feh = parse_inferred_properties(gen_text)
+                    raw_text = gen_text.strip()
+                    pred_teff, pred_logg, pred_feh = parse_inferred_properties(raw_text)
+                    if pred_teff is None and pred_logg is None and pred_feh is None:
+                        print(f"[WARN] Unable to parse properties for alpha={alpha:.2f}: {raw_text}")
 
                     def fmt(val):
                         if val is None:
@@ -394,6 +397,7 @@ def main():
                         fmt(teff_b),
                         fmt(logg_b),
                         fmt(feh_b),
+                        json.dumps(raw_text),
                     ]
                     fh.write(','.join(row) + '\n')
                     if device.type == 'cuda':
