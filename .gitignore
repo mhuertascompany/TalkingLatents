@@ -29,3 +29,5 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+analysis/interp/outputs_tests/test_trajectory.png
+analysis/interp/outputs_tests/latent_interpolation_example.png
